@@ -1,0 +1,108 @@
+Pure Components
+===============
+
+<script>
+    init_alia_demos(['pure-component']);
+</script>
+
+By default, alia traverses your entire component tree whenever it needs to
+refresh the UI. For modest UIs, this isn't an issue. alia is designed to make
+this process fast, especially for cases where not much has changed. However, as
+your UI grows more complex, the act of traversing it may become prohibitively
+expensive. Pure components are designed to solve this.
+
+Pure components are alia's analogue to pure functions. Just as the result of a
+pure function is only dependent on its inputs, the result of a pure component
+is only dependent on its inputs and state. And just as we can cache the result
+of invoking a pure function on specific inputs, alia can *skip over* a pure
+component if it knows that its inputs and state haven't changed.
+
+Through judicious use of pure components, you can change your UI's refresh
+complexity from linear to logarithmic, isolating the traversal to just those
+components that need updates (and their ancestors).
+
+You don't have to do anything special to mark a component as pure, but you need
+to follow two simple rules:
+
+1. Your component function should take all of its arguments (other than the
+   context argument) as signals.
+
+1. It should only access data via the context and those signal arguments.
+
+If you follow those rules, you can invoke your component via
+`invoke_pure_component`, and alia will skip it whenever possible.
+
+<dl>
+
+<dt>invoke_pure_component(ctx, f, ...args)</dt><dd>
+
+Equivalent to calling `f(ctx, args...)` except that the call will be elided whenever possible.
+
+`f` is only invoked when:
+
+* One or more of `args` has changed.
+* Internal state within `f` has changed.
+* An event needs to be delivered to a component within `f`.
+
+</dd>
+
+</dl>
+
+Below is an example that demonstrates the definition and use of a pure
+component.
+
+```cpp
+// This will be our pure component.
+void
+player_ui(html::context ctx, duplex<std::string> name)
+{
+    // Pure components can have internal state.
+    auto score = get_state(ctx, 0);
+
+    // Here's the UI defined by our pure component.
+    div(ctx, "item", [&] {
+        h4(ctx, name);
+        p(ctx, printf(ctx, "%d points", score));
+        button(ctx, "GOAL!", ++score);
+    });
+
+    // Don't do this! This is just to illustrate when this component is
+    // actually invoked.
+    ++player_ui_invocation_count;
+}
+
+void
+main_ui(html::context ctx)
+{
+    // Get some state to pass into our pure component.
+    auto name = get_state(ctx, "Name");
+
+    // Allow the player name to be edited outside the pure component.
+    html::input(ctx, name);
+
+    hr(ctx);
+
+    // Invoke the pure component.
+    // player_ui will only actually be invoked if `name` changes or if there's
+    // an event inside it.
+    invoke_pure_component(ctx, player_ui, name);
+
+    // For illustration purposes...
+    html::p(ctx,
+        printf(ctx,
+            "player_ui() has been invoked %i time(s).",
+            player_ui_invocation_count));
+
+    hr(ctx);
+
+    // Here's some other UI to demonstrate that we can interact with it without
+    // invoking player_ui.
+    auto n = get_state(ctx, 0);
+    html::p(ctx, printf(ctx, "N is %i.", n));
+    html::button(ctx, "Increment", ++n);
+}
+```
+
+<div class="demo-panel">
+<div id="pure-component"></div>
+</div>
