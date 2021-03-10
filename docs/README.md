@@ -1,6 +1,10 @@
 alia - A Library for Interactive Applications
 =============================================
 
+<script>
+    init_alia_demos(['tip-calculator-demo']);
+</script>
+
 alia (pronounced uh-LEE-uh) is a modern C++ library for declaratively
 developing user interfaces. It currently targets the web. In alia, the UI of
 your application is expressed as a composition of *component functions.*
@@ -32,12 +36,11 @@ alia component functions:
 Although alia is currently focused on web development, its core mechanics are
 generic, and the intention is to eventually extend it to other environments.
 
-Some Code
----------
+Live Example
+------------
 
-Below is a simple tip calculator made using alia. You can see it in action <a
-target="_self" href="https://alia.dev/#/assorted-examples?id=tip-calculator">
-here</a>, along with other examples.
+Below is a simple tip calculator made using alia. You can see some other
+assorted examples [here](asoorted-examples.md).
 
 ```cpp
 void
@@ -45,14 +48,12 @@ tip_calculator(html::context ctx)
 {
     // Get some component-local state for the bill amount.
     auto bill = alia::get_state(ctx, empty<double>());
-
     html::p(ctx, "How much is the bill?");
     // Display an input that allows the user to manipulate our bill state.
     html::input(ctx, bill);
 
     // Get some more component-local state for the tip rate.
     auto tip_rate = alia::get_state(ctx, empty<double>());
-
     html::p(ctx, "What percentage do you want to tip?");
     // Users like percentages, but we want to keep the 'tip_rate' state as a
     // rate internally, so this input presents a scaled view of it for the user.
@@ -70,7 +71,7 @@ tip_calculator(html::context ctx)
     auto total = bill + tip;
     html::p(ctx,
         alia::printf(ctx,
-          "You should tip %.2f, for a total of %.2f.", tip, total));
+            "You should tip %.2f, for a total of %.2f.", tip, total));
 
     // Conditionally display a message suggesting cash for small amounts.
     alia_if (total < 10)
@@ -81,6 +82,12 @@ tip_calculator(html::context ctx)
     alia_end
 }
 ```
+
+And here it is live...
+
+<div class="demo-panel">
+<div id="tip-calculator-demo"></div>
+</div>
 
 Project Status
 --------------
@@ -102,7 +109,8 @@ object-oriented GUI libraries and drive their object hierarchies declaratively.
 The only integration that currently exists is
 [alia/HTML](html-introduction.md), which connects alia to HTML5 and allows you
 to write client-side web apps in alia. I'm currently using this for in-house
-web apps, but it definitely shouldn't be considered mature.
+web apps and adding additional capabilities as I need them, but it definitely
+shouldn't be considered mature.
 
 alia is part of a long-term vision to enable declarative development of
 computationally intensive user interfaces in C++. If you're interested in where
