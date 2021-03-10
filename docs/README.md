@@ -40,7 +40,11 @@ Live Example
 ------------
 
 Below is a simple tip calculator made using alia. You can see some other
-assorted examples [here](asoorted-examples.md).
+assorted examples [here](assorted-examples.md).
+
+<div class="demo-panel">
+<div id="tip-calculator-demo"></div>
+</div>
 
 ```cpp
 void
@@ -82,12 +86,6 @@ tip_calculator(html::context ctx)
     alia_end
 }
 ```
-
-And here it is live...
-
-<div class="demo-panel">
-<div id="tip-calculator-demo"></div>
-</div>
 
 Project Status
 --------------
