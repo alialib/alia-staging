@@ -20,11 +20,10 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-// alia.hpp - refs/tags/0.7.0 (f49b5f24ba09c7e3100c60907cc910b9abf49cc0) - generated 2021-02-27T15:02:31+00:00
+// alia.hpp - refs/tags/0.8.0 (b971fb3e11adb5bee7adf829ae712d68deb83b2f) - generated 2021-03-10T21:41:38+00:00
 
 #ifndef ALIA_CORE_HPP
 #define ALIA_CORE_HPP
-
 
 #include <cassert>
 #include <cstdint>
@@ -165,6 +164,7 @@ struct uncaught_exception_detector
 };
 
 } // namespace alia
+
 
 #include <sstream>
 
@@ -1444,7 +1444,10 @@ struct signal_interface : untyped_signal_base
     destructive_ref() const = 0;
 
     // Write the signal's value.
-    virtual void
+    // The signal can *optionally* return the new value ID of the signal (after
+    // taking on the value that was written in by this call). If this is
+    // impractical, it can just return null_id instead.
+    virtual id_interface const&
     write(Value value) const = 0;
 };
 
@@ -1480,8 +1483,9 @@ struct signal : signal_base<Derived, Value, Capabilities>
     {                                                                         \
         return false;                                                         \
     }                                                                         \
-    void write(Value) const override                                          \
+    id_interface const& write(Value) const override                           \
     {                                                                         \
+        return null_id;                                                       \
     }
 
 #define ALIA_DEFINE_UNUSED_SIGNAL_MOVE_INTERFACE(Value)                       \
@@ -1624,10 +1628,10 @@ struct signal_ref
     {
         return ref_->ready_to_write();
     }
-    void
+    id_interface const&
     write(Value value) const override
     {
-        ref_->write(std::move(value));
+        return ref_->write(std::move(value));
     }
     bool
     invalidate(std::exception_ptr error) const override
@@ -1755,14 +1759,14 @@ signal_ready_to_write(Signal const& signal)
 // error if the signal's type doesn't support writing.
 // Note that if the signal isn't ready to write, this is a no op.
 template<class Signal, class Value>
-std::enable_if_t<signal_is_writable<Signal>::value>
+std::enable_if_t<signal_is_writable<Signal>::value, id_interface const&>
 write_signal(Signal const& signal, Value value)
 {
     if (signal.ready_to_write())
     {
         try
         {
-            signal.write(std::move(value));
+            return signal.write(std::move(value));
         }
         catch (validation_error&)
         {
@@ -1774,6 +1778,7 @@ write_signal(Signal const& signal, Value value)
                 std::rethrow_exception(e);
         }
     }
+    return null_id;
 }
 
 // signal_is_duplex<Signal>::value yields a compile-time boolean indicating
@@ -2080,10 +2085,10 @@ struct signal_wrapper : signal<Derived, Value, Capabilities>
     {
         return wrapped_.ready_to_write();
     }
-    void
+    id_interface const&
     write(typename Wrapped::value_type value) const override
     {
-        wrapped_.write(std::move(value));
+        return wrapped_.write(std::move(value));
     }
     void
     clear() const override
@@ -2265,8 +2270,9 @@ struct empty_signal
     }
     // Since this is never ready to write, none of this should ever be called.
     // LCOV_EXCL_START
-    void write(Value) const override
+    id_interface const& write(Value) const override
     {
+        return null_id;
     }
     void
     clear() const override
@@ -2443,10 +2449,11 @@ struct direct_signal
     {
         return true;
     }
-    void
+    id_interface const&
     write(Value value) const override
     {
         *v_ = std::move(value);
+        return this->value_id();
     }
 
  private:
@@ -2878,6 +2885,1386 @@ struct optional_context
 
  private:
     Context ctx_;
+};
+
+} // namespace alia
+
+
+
+
+
+namespace alia {
+
+// signalize(x) turns x into a signal if it isn't already one.
+// Or, in other words...
+// signalize(s), where s is a signal, returns s.
+// signalize(v), where v is a raw value, returns a value signal carrying v.
+template<class Signal>
+std::enable_if_t<is_readable_signal_type<Signal>::value, Signal>
+signalize(Signal s)
+{
+    return std::move(s);
+}
+template<class Value, std::enable_if_t<!is_signal_type<Value>::value, int> = 0>
+auto
+signalize(Value v)
+{
+    return value(std::move(v));
+}
+
+// fake_readability(s), where :s is a signal, yields a wrapper for :s that
+// pretends to have read capabilities. It will never actually have a value, but
+// it will type-check as a readable signal.
+template<class Wrapped>
+struct readability_faker : signal_wrapper<
+                               readability_faker<Wrapped>,
+                               Wrapped,
+                               typename Wrapped::value_type,
+                               typename signal_capabilities_union<
+                                   read_only_signal,
+                                   typename Wrapped::capabilities>::type>
+{
+    readability_faker(Wrapped wrapped)
+        : readability_faker::signal_wrapper(std::move(wrapped))
+    {
+    }
+    id_interface const&
+    value_id() const override
+    {
+        return null_id;
+    }
+    bool
+    has_value() const override
+    {
+        return false;
+    }
+    // Since this is only faking readability, read() should never be called.
+    // LCOV_EXCL_START
+    typename Wrapped::value_type const&
+    read() const override
+    {
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wnull-dereference"
+#endif
+        return *(typename Wrapped::value_type const*) nullptr;
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
+    }
+    // LCOV_EXCL_STOP
+};
+template<class Wrapped>
+readability_faker<Wrapped>
+fake_readability(Wrapped wrapped)
+{
+    return readability_faker<Wrapped>(std::move(wrapped));
+}
+
+// fake_writability(s), where :s is a signal, yields a wrapper for :s that
+// pretends to have write capabilities. It will never actually be ready to
+// write, but it will type-check as a writable signal.
+template<class Wrapped>
+struct writability_faker : signal_wrapper<
+                               writability_faker<Wrapped>,
+                               Wrapped,
+                               typename Wrapped::value_type,
+                               typename signal_capabilities_union<
+                                   write_only_signal,
+                                   typename Wrapped::capabilities>::type>
+{
+    writability_faker(Wrapped wrapped)
+        : writability_faker::signal_wrapper(std::move(wrapped))
+    {
+    }
+    bool
+    ready_to_write() const override
+    {
+        return false;
+    }
+    // Since this is only faking writability, write() should never be called.
+    // LCOV_EXCL_START
+    id_interface const& write(typename Wrapped::value_type) const override
+    {
+        return null_id;
+    }
+    // LCOV_EXCL_STOP
+};
+template<class Wrapped>
+writability_faker<Wrapped>
+fake_writability(Wrapped wrapped)
+{
+    return writability_faker<Wrapped>(std::move(wrapped));
+}
+
+// signal_cast<Value>(x), where :x is a signal, yields a proxy for :x with
+// the value type :Value. The proxy will apply static_casts to convert its
+// own values to and from :x's value type.
+template<class Wrapped, class To>
+struct casting_signal : casting_signal_wrapper<
+                            casting_signal<Wrapped, To>,
+                            Wrapped,
+                            To,
+                            typename signal_capabilities_intersection<
+                                typename Wrapped::capabilities,
+                                move_activated_clearable_signal>::type>
+{
+    casting_signal(Wrapped wrapped)
+        : casting_signal::casting_signal_wrapper(std::move(wrapped))
+    {
+    }
+    To const&
+    read() const override
+    {
+        value_ = this->move_out();
+        return value_;
+    }
+    To
+    move_out() const override
+    {
+        return static_cast<To>(forward_signal(this->wrapped_));
+    }
+    To&
+    destructive_ref() const override
+    {
+        value_ = this->move_out();
+        return value_;
+    }
+    id_interface const&
+    write(To value) const override
+    {
+        return this->wrapped_.write(
+            static_cast<typename Wrapped::value_type>(value));
+    }
+
+ private:
+    mutable To value_;
+};
+// signal_caster is just another level of indirection that allows us to
+// eliminate the casting_signal entirely if it's just going to cast to the same
+// type.
+template<class Wrapped, class To>
+struct signal_caster
+{
+    typedef casting_signal<Wrapped, To> type;
+    static type
+    apply(Wrapped wrapped)
+    {
+        return type(std::move(wrapped));
+    }
+};
+template<class Wrapped>
+struct signal_caster<Wrapped, typename Wrapped::value_type>
+{
+    typedef Wrapped type;
+    static type
+    apply(Wrapped wrapped)
+    {
+        return wrapped;
+    }
+};
+template<class To, class Wrapped>
+typename signal_caster<Wrapped, To>::type
+signal_cast(Wrapped wrapped)
+{
+    return signal_caster<Wrapped, To>::apply(std::move(wrapped));
+}
+
+// has_value(x) yields a signal to a boolean which indicates whether or not :x
+// has a value. (The returned signal itself always has a value.)
+template<class Wrapped>
+struct value_presence_signal
+    : regular_signal<value_presence_signal<Wrapped>, bool, read_only_signal>
+{
+    value_presence_signal(Wrapped wrapped) : wrapped_(std::move(wrapped))
+    {
+    }
+    bool
+    has_value() const override
+    {
+        return true;
+    }
+    bool const&
+    read() const override
+    {
+        value_ = wrapped_.has_value();
+        return value_;
+    }
+
+ private:
+    Wrapped wrapped_;
+    mutable bool value_;
+};
+template<class Wrapped>
+auto
+has_value(Wrapped wrapped)
+{
+    return value_presence_signal<Wrapped>(std::move(wrapped));
+}
+
+// ready_to_write(x) yields a signal to a boolean that indicates whether or not
+// :x is ready to write. (The returned signal always has a value.)
+template<class Wrapped>
+struct write_readiness_signal
+    : regular_signal<write_readiness_signal<Wrapped>, bool, read_only_signal>
+{
+    write_readiness_signal(Wrapped wrapped) : wrapped_(std::move(wrapped))
+    {
+    }
+    bool
+    has_value() const override
+    {
+        return true;
+    }
+    bool const&
+    read() const override
+    {
+        value_ = wrapped_.ready_to_write();
+        return value_;
+    }
+
+ private:
+    Wrapped wrapped_;
+    mutable bool value_;
+};
+template<class Wrapped>
+auto
+ready_to_write(Wrapped wrapped)
+{
+    return write_readiness_signal<Wrapped>(std::move(wrapped));
+}
+
+// add_default(primary, default), where :primary and :default are both
+// signals, yields another signal whose value is that of :primary if it has one
+// and that of :default otherwise.
+// All writes go directly to :primary.
+template<class Primary, class Default>
+struct default_value_signal
+    : signal_wrapper<
+          default_value_signal<Primary, Default>,
+          Primary,
+          typename Primary::value_type,
+          signal_capabilities<
+              signal_capability_level_intersection<
+                  Primary::capabilities::reading,
+                  Default::capabilities::reading>::value,
+              Primary::capabilities::writing>>
+{
+    default_value_signal()
+    {
+    }
+    default_value_signal(Primary primary, Default default_value)
+        : default_value_signal::signal_wrapper(std::move(primary)),
+          default_(std::move(default_value))
+    {
+    }
+    bool
+    has_value() const override
+    {
+        return this->wrapped_.has_value() || default_.has_value();
+    }
+    typename Primary::value_type const&
+    read() const override
+    {
+        return this->wrapped_.has_value() ? this->wrapped_.read()
+                                          : default_.read();
+    }
+    typename Primary::value_type
+    move_out() const override
+    {
+        return this->wrapped_.has_value() ? this->wrapped_.move_out()
+                                          : default_.move_out();
+    }
+    typename Primary::value_type&
+    destructive_ref() const override
+    {
+        return this->wrapped_.has_value() ? this->wrapped_.destructive_ref()
+                                          : default_.destructive_ref();
+    }
+    id_interface const&
+    value_id() const override
+    {
+        id_ = combine_ids(
+            make_id(this->wrapped_.has_value()),
+            this->wrapped_.has_value() ? ref(this->wrapped_.value_id())
+                                       : ref(default_.value_id()));
+        return id_;
+    }
+
+ private:
+    mutable id_pair<simple_id<bool>, id_ref> id_;
+    Default default_;
+};
+template<class Primary, class Default>
+default_value_signal<Primary, Default>
+make_default_value_signal(Primary primary, Default default_)
+{
+    return default_value_signal<Primary, Default>(
+        std::move(primary), std::move(default_));
+}
+template<class Primary, class Default>
+auto
+add_default(Primary primary, Default default_)
+{
+    return make_default_value_signal(
+        signalize(std::move(primary)), signalize(std::move(default_)));
+}
+
+// simplify_id(s), where :s is a signal, yields a wrapper for :s with the exact
+// same read/write behavior but whose value ID is a simple_id (i.e., it is
+// simply the value of the signal).
+//
+// The main utility of this is in cases where you have a signal carrying a
+// small value with a complicated value ID (because it was picked from the
+// signal of a larger data structure, for example). The more complicated ID
+// might change superfluously.
+//
+template<class Wrapped>
+struct simplified_id_wrapper
+    : signal_wrapper<simplified_id_wrapper<Wrapped>, Wrapped>
+{
+    simplified_id_wrapper(Wrapped wrapped)
+        : simplified_id_wrapper::signal_wrapper(std::move(wrapped))
+    {
+    }
+    id_interface const&
+    value_id() const override
+    {
+        if (this->has_value())
+        {
+            id_ = make_id_by_reference(this->read());
+            return id_;
+        }
+        return null_id;
+    }
+
+ private:
+    mutable simple_id_by_reference<typename Wrapped::value_type> id_;
+};
+template<class Wrapped>
+simplified_id_wrapper<Wrapped>
+simplify_id(Wrapped wrapped)
+{
+    return simplified_id_wrapper<Wrapped>(std::move(wrapped));
+}
+
+// mask(signal, availibility_flag) does the equivalent of bit masking on
+// individual signals. If :availibility_flag evaluates to true, the mask
+// evaluates to a signal equivalent to :signal. Otherwise, it evaluates to an
+// empty signal of the same type.
+template<class Primary, class Mask>
+struct masking_signal : signal_wrapper<masking_signal<Primary, Mask>, Primary>
+{
+    masking_signal()
+    {
+    }
+    masking_signal(Primary primary, Mask mask)
+        : masking_signal::signal_wrapper(std::move(primary)),
+          mask_(std::move(mask))
+    {
+    }
+    bool
+    has_value() const override
+    {
+        return mask_.has_value() && mask_.read() && this->wrapped_.has_value();
+    }
+    id_interface const&
+    value_id() const override
+    {
+        if (mask_.has_value() && mask_.read())
+            return this->wrapped_.value_id();
+        else
+            return null_id;
+    }
+    bool
+    ready_to_write() const override
+    {
+        return mask_.has_value() && mask_.read()
+               && this->wrapped_.ready_to_write();
+    }
+
+ private:
+    Mask mask_;
+};
+template<class Signal, class AvailabilityFlag>
+auto
+make_masking_signal(Signal signal, AvailabilityFlag availability_flag)
+{
+    return masking_signal<Signal, AvailabilityFlag>(
+        std::move(signal), std::move(availability_flag));
+}
+template<class Signal, class AvailabilityFlag>
+auto
+mask(Signal signal, AvailabilityFlag availability_flag)
+{
+    return make_masking_signal(
+        signalize(std::move(signal)), signalize(std::move(availability_flag)));
+}
+
+// mask_writes(signal, writability_flag) masks writes to :signal according to
+// the value of :writability_flag.
+//
+// :writability_flag can be either a signal or a raw value. If it evaluates to
+// true (in a boolean context), the mask evaluates to a signal equivalent to
+// :signal. Otherwise, it evaluates to one with equivalent reading behavior but
+// with writing disabled.
+//
+// Note that in either case, the masked version has the same capabilities as
+// :signal.
+//
+template<class Primary, class Mask>
+struct write_masking_signal
+    : signal_wrapper<write_masking_signal<Primary, Mask>, Primary>
+{
+    write_masking_signal()
+    {
+    }
+    write_masking_signal(Primary primary, Mask mask)
+        : write_masking_signal::signal_wrapper(std::move(primary)),
+          mask_(std::move(mask))
+    {
+    }
+    bool
+    ready_to_write() const override
+    {
+        return mask_.has_value() && mask_.read()
+               && this->wrapped_.ready_to_write();
+    }
+
+ private:
+    Mask mask_;
+};
+template<class Signal, class WritabilityFlag>
+auto
+make_write_masking_signal(Signal signal, WritabilityFlag writability_flag)
+{
+    return write_masking_signal<Signal, WritabilityFlag>(
+        std::move(signal), std::move(writability_flag));
+}
+template<class Signal, class WritabilityFlag>
+auto
+mask_writes(Signal signal, WritabilityFlag writability_flag)
+{
+    return make_write_masking_signal(
+        std::move(signal), signalize(std::move(writability_flag)));
+}
+
+// disable_writes(s), where :s is a signal, yields a wrapper for :s where
+// writes are disabled. Like mask_writes, this doesn't change the capabilities
+// of :s.
+template<class Signal>
+auto
+disable_writes(Signal s)
+{
+    return mask_writes(std::move(s), false);
+}
+
+// mask_reads(signal, readality_flag) masks reads to :signal according to the
+// value of :readality_flag.
+//
+// :readality_flag can be either a signal or a raw value. If it evaluates to
+// true (in a boolean context), the mask evaluates to a signal equivalent to
+// :signal. Otherwise, it evaluates to one with equivalent writing behavior but
+// with reading disabled.
+//
+// Note that in either case, the masked version has the same capabilities as
+// :signal.
+//
+template<class Primary, class Mask>
+struct read_masking_signal
+    : signal_wrapper<read_masking_signal<Primary, Mask>, Primary>
+{
+    read_masking_signal()
+    {
+    }
+    read_masking_signal(Primary primary, Mask mask)
+        : read_masking_signal::signal_wrapper(std::move(primary)),
+          mask_(std::move(mask))
+    {
+    }
+    bool
+    has_value() const override
+    {
+        return mask_.has_value() && mask_.read() && this->wrapped_.has_value();
+    }
+
+ private:
+    Mask mask_;
+};
+template<class Signal, class ReadabilityFlag>
+auto
+make_read_masking_signal(Signal signal, ReadabilityFlag readability_flag)
+{
+    return read_masking_signal<Signal, ReadabilityFlag>(
+        std::move(signal), std::move(readability_flag));
+}
+template<class Signal, class ReadabilityFlag>
+auto
+mask_reads(Signal signal, ReadabilityFlag readability_flag)
+{
+    return make_read_masking_signal(
+        std::move(signal), signalize(std::move(readability_flag)));
+}
+
+// disable_reads(s), where :s is a signal, yields a wrapper for :s where reads
+// are disabled. Like mask_reads, this doesn't change the capabilities of :s.
+template<class Signal>
+auto
+disable_reads(Signal s)
+{
+    return mask_reads(std::move(s), false);
+}
+
+// unwrap(signal), where :signal is a signal carrying a std::optional value,
+// yields a signal that directly carries the value wrapped inside the optional.
+
+template<class OptionalCapabilities>
+struct unwrapper_signal_capabilities
+{
+};
+template<unsigned Reading, unsigned Writing>
+struct unwrapper_signal_capabilities<signal_capabilities<Reading, Writing>>
+{
+    // If the std::optional signal is writable, then the 'unwrapped' signal
+    // is clearable.
+    typedef signal_capabilities<Reading, signal_clearable> type;
+};
+template<unsigned Reading>
+struct unwrapper_signal_capabilities<
+    signal_capabilities<Reading, signal_unwritable>>
+{
+    // If the std::optional signal is NOT writable, then the 'unwrapped' signal
+    // also isn't.
+    typedef signal_capabilities<Reading, signal_unwritable> type;
+};
+
+template<class Wrapped>
+struct unwrapper_signal : casting_signal_wrapper<
+                              unwrapper_signal<Wrapped>,
+                              Wrapped,
+                              typename Wrapped::value_type::value_type,
+                              typename unwrapper_signal_capabilities<
+                                  typename Wrapped::capabilities>::type>
+{
+    unwrapper_signal()
+    {
+    }
+    unwrapper_signal(Wrapped wrapped)
+        : unwrapper_signal::casting_signal_wrapper(std::move(wrapped))
+    {
+    }
+    bool
+    has_value() const override
+    {
+        return this->wrapped_.has_value() && this->wrapped_.read().has_value();
+    }
+    typename Wrapped::value_type::value_type const&
+    read() const override
+    {
+        return this->wrapped_.read().value();
+    }
+    typename Wrapped::value_type::value_type
+    move_out() const override
+    {
+        return *this->wrapped_.move_out();
+    }
+    typename Wrapped::value_type::value_type&
+    destructive_ref() const override
+    {
+        return *this->wrapped_.destructive_ref();
+    }
+    id_interface const&
+    value_id() const override
+    {
+        if (this->has_value())
+            return this->wrapped_.value_id();
+        else
+            return null_id;
+    }
+    id_interface const&
+    write(typename Wrapped::value_type::value_type value) const override
+    {
+        return this->wrapped_.write(std::move(value));
+    }
+    void
+    clear() const override
+    {
+        this->wrapped_.write(typename Wrapped::value_type());
+    }
+};
+template<class Signal>
+auto
+unwrap(Signal signal)
+{
+    return unwrapper_signal<Signal>(std::move(signal));
+}
+
+// move(signal) returns a signal with movement activated (if possible).
+//
+// If the input signal supports movement, the returned signal's value can be
+// moved out with move_signal() or forward_signal().
+//
+// If the input signal doesn't support movement, it's returned unchanged.
+//
+template<class Wrapped>
+struct signal_movement_activator : signal_wrapper<
+                                       signal_movement_activator<Wrapped>,
+                                       Wrapped,
+                                       typename Wrapped::value_type,
+                                       signal_capabilities<
+                                           signal_move_activated,
+                                           Wrapped::capabilities::writing>>
+{
+    signal_movement_activator()
+    {
+    }
+    signal_movement_activator(Wrapped wrapped)
+        : signal_movement_activator::signal_wrapper(std::move(wrapped))
+    {
+    }
+};
+template<
+    class Signal,
+    std::enable_if_t<is_movable_signal_type<Signal>::value, int> = 0>
+auto
+move(Signal signal)
+{
+    return signal_movement_activator<Signal>(std::move(signal));
+}
+template<
+    class Signal,
+    std::enable_if_t<
+        is_signal_type<Signal>::value && signal_is_readable<Signal>::value
+            && !signal_is_movable<Signal>::value,
+        int> = 0>
+auto
+move(Signal signal)
+{
+    return signal;
+}
+
+} // namespace alia
+
+
+// This file defines the alia action interface, some common implementations of
+// it, and some utilities for working with it.
+//
+// An action is essentially a response to an event that's dispatched by alia.
+// When specifying a component that can generate events, the application
+// supplies the action that should be performed when the corresponding event is
+// generated. Using this style allows event handling to be written in a safer
+// and more declarative manner.
+//
+// Actions are very similar to signals in the way that they are used in an
+// application. Like signals, they're typically created directly at the call
+// site as function arguments and are only valid for the life of the function
+// call.
+
+namespace alia {
+
+// untyped_action_interface defines functionality common to all actions,
+// irrespective of the type of arguments that the action takes.
+struct untyped_action_interface
+{
+    // Is this action ready to be performed?
+    virtual bool
+    is_ready() const = 0;
+};
+
+template<class... Args>
+struct action_interface : untyped_action_interface
+{
+    // Perform this action.
+    //
+    // :intermediary is used to implement the latch-like semantics of actions.
+    // It should be invoked AFTER reading any signals you need to read but
+    // BEFORE invoking any side effects.
+    //
+    virtual void
+    perform(function_view<void()> const& intermediary, Args... args) const = 0;
+};
+
+// is_action_type<T>::value yields a compile-time boolean indicating whether or
+// not T is an alia action type.
+template<class T>
+struct is_action_type : std::is_base_of<untyped_action_interface, T>
+{
+};
+
+// Is the given action ready?
+template<class... Args>
+bool
+action_is_ready(action_interface<Args...> const& action)
+{
+    return action.is_ready();
+}
+
+// Perform an action.
+template<class... Args>
+void
+perform_action(action_interface<Args...> const& action, Args... args)
+{
+    if (action.is_ready())
+        action.perform([]() {}, std::move(args)...);
+}
+
+// action_ref is a reference to an action that implements the action interface
+// itself.
+template<class... Args>
+struct action_ref : action_interface<Args...>
+{
+    // Construct from a reference to another action.
+    action_ref(action_interface<Args...> const& ref) : action_(&ref)
+    {
+    }
+    // Construct from another action_ref. - This is meant to prevent
+    // unnecessary layers of indirection.
+    action_ref(action_ref<Args...> const& other) : action_(other.action_)
+    {
+    }
+
+    bool
+    is_ready() const
+    {
+        return action_->is_ready();
+    }
+
+    void
+    perform(function_view<void()> const& intermediary, Args... args) const
+    {
+        action_->perform(intermediary, std::move(args)...);
+    }
+
+ private:
+    action_interface<Args...> const* action_;
+};
+
+template<class... Args>
+using action = action_ref<Args...>;
+
+// comma operator
+//
+// Using the comma operator between two actions creates a combined action that
+// performs the two actions in sequence.
+
+template<class First, class Second, class Interface>
+struct action_pair;
+
+template<class First, class Second, class... Args>
+struct action_pair<First, Second, action_interface<Args...>>
+    : action_interface<Args...>
+{
+    action_pair(First first, Second second)
+        : first_(std::move(first)), second_(std::move(second))
+    {
+    }
+
+    bool
+    is_ready() const
+    {
+        return first_.is_ready() && second_.is_ready();
+    }
+
+    void
+    perform(function_view<void()> const& intermediary, Args... args) const
+    {
+        second_.perform(
+            [&]() { first_.perform(intermediary, args...); }, args...);
+    }
+
+ private:
+    First first_;
+    Second second_;
+};
+
+template<
+    class First,
+    class Second,
+    std::enable_if_t<
+        is_action_type<First>::value && is_action_type<Second>::value,
+        int> = 0>
+auto
+operator,(First first, Second second)
+{
+    return action_pair<First, Second, typename First::action_interface>(
+        std::move(first), std::move(second));
+}
+
+// operator <<
+//
+// (a << s), where a is an action and s is a readable signal, returns another
+// action that is like :a but with the value of :s bound to its first argument.
+//
+template<class Action, class Signal, class Interface>
+struct bound_action;
+template<class Action, class Signal, class BoundArg, class... Args>
+struct bound_action<Action, Signal, action_interface<BoundArg, Args...>>
+    : action_interface<Args...>
+{
+    bound_action(Action action, Signal signal)
+        : action_(std::move(action)), signal_(std::move(signal))
+    {
+    }
+
+    bool
+    is_ready() const
+    {
+        return action_.is_ready() && signal_.has_value();
+    }
+
+    void
+    perform(function_view<void()> const& intermediary, Args... args) const
+    {
+        action_.perform(
+            intermediary, forward_signal(signal_), std::move(args)...);
+    }
+
+ private:
+    Action action_;
+    Signal signal_;
+};
+template<
+    class Action,
+    class Signal,
+    std::enable_if_t<
+        is_action_type<Action>::value
+            && is_readable_signal_type<Signal>::value,
+        int> = 0>
+auto
+operator<<(Action action, Signal signal)
+{
+    return bound_action<Action, Signal, typename Action::action_interface>(
+        std::move(action), std::move(signal));
+}
+template<
+    class Action,
+    class Value,
+    std::enable_if_t<
+        is_action_type<Action>::value && !is_signal_type<Value>::value,
+        int> = 0>
+auto
+operator<<(Action action, Value v)
+{
+    return std::move(action) << value(std::move(v));
+}
+
+// operator <<=
+//
+// sink <<= source, where :sink and :source are both signals, creates an
+// action that will set the value of :sink to the value held in :source. In
+// order for the action to be considered ready, :source must have a value and
+// :sink must be ready to write.
+
+template<class Sink, class Source>
+struct copy_action : action_interface<>
+{
+    copy_action(Sink sink, Source source)
+        : sink_(std::move(sink)), source_(std::move(source))
+    {
+    }
+
+    bool
+    is_ready() const
+    {
+        return source_.has_value() && sink_.ready_to_write();
+    }
+
+    void
+    perform(function_view<void()> const& intermediary) const
+    {
+        typename Source::value_type source_value = forward_signal(source_);
+        intermediary();
+        sink_.write(std::move(source_value));
+    }
+
+ private:
+    Sink sink_;
+    Source source_;
+};
+
+template<
+    class Sink,
+    class Source,
+    std::enable_if_t<
+        is_writable_signal_type<Sink>::value
+            && is_readable_signal_type<Source>::value,
+        int> = 0>
+auto
+operator<<=(Sink sink, Source source)
+{
+    return copy_action<Sink, Source>(std::move(sink), std::move(source));
+}
+
+template<
+    class Sink,
+    class Source,
+    std::enable_if_t<
+        is_writable_signal_type<Sink>::value && !is_signal_type<Source>::value,
+        int> = 0>
+auto
+operator<<=(Sink sink, Source source)
+{
+    return sink <<= value(source);
+}
+
+// The noop action is always ready to perform but does nothing.
+
+template<class... Args>
+struct noop_action : action_interface<Args...>
+{
+    noop_action()
+    {
+    }
+
+    bool
+    is_ready() const
+    {
+        return true;
+    }
+
+    void
+    perform(function_view<void()> const& intermediary, Args...) const
+    {
+        intermediary();
+    }
+};
+
+namespace actions {
+
+template<class... Args>
+noop_action<Args...>
+noop()
+{
+    return noop_action<Args...>();
+}
+
+} // namespace actions
+
+// The unready action is never ready to perform.
+
+template<class... Args>
+struct unready_action : action_interface<Args...>
+{
+    unready_action()
+    {
+    }
+
+    bool
+    is_ready() const
+    {
+        return false;
+    }
+
+    // LCOV_EXCL_START
+    void
+    perform(function_view<void()> const&, Args...) const
+    {
+        // This action is never supposed to be performed!
+        assert(0);
+    }
+    // LCOV_EXCL_STOP
+};
+
+namespace actions {
+
+template<class... Args>
+unready_action<Args...>
+unready()
+{
+    return unready_action<Args...>();
+}
+
+} // namespace actions
+
+// actions::toggle(flag), where :flag is a signal to a boolean, creates an
+// action that will toggle the value of :flag between true and false.
+//
+// Note that this could also be used with other value types as long as the !
+// operator provides a reasonable "toggle" function.
+
+namespace actions {
+
+template<class Flag>
+auto
+toggle(Flag flag)
+{
+    return flag <<= !flag;
+}
+
+} // namespace actions
+
+// actions::push_back(container), where :container is a signal, creates an
+// action that takes an item as a parameter and pushes it onto the back of
+// :container.
+
+template<class Container, class Item>
+struct push_back_action : action_interface<Item>
+{
+    push_back_action(Container container) : container_(std::move(container))
+    {
+    }
+
+    bool
+    is_ready() const
+    {
+        return container_.has_value() && container_.ready_to_write();
+    }
+
+    void
+    perform(function_view<void()> const& intermediary, Item item) const
+    {
+        auto new_container = forward_signal(alia::move(container_));
+        new_container.push_back(std::move(item));
+        intermediary();
+        container_.write(std::move(new_container));
+    }
+
+ private:
+    Container container_;
+};
+
+namespace actions {
+
+template<class Container>
+auto
+push_back(Container container)
+{
+    return push_back_action<
+        Container,
+        typename Container::value_type::value_type>(std::move(container));
+}
+
+} // namespace actions
+
+// actions::erase_index(container, index) creates an actions that erases the
+// item at :index from :container.
+// :container must be a duplex signal carrying a random access container.
+// :index can be either a raw size_t or a readable signal carrying a size_t.
+
+template<class Container, class Index>
+struct erase_index_action : action_interface<>
+{
+    erase_index_action(Container container, Index index)
+        : container_(std::move(container)), index_(std::move(index))
+    {
+    }
+
+    bool
+    is_ready() const
+    {
+        return container_.has_value() && container_.ready_to_write()
+               && index_.has_value();
+    }
+
+    void
+    perform(function_view<void()> const& intermediary) const
+    {
+        auto new_container = forward_signal(alia::move(container_));
+        new_container.erase(new_container.begin() + read_signal(index_));
+        intermediary();
+        container_.write(std::move(new_container));
+    }
+
+ private:
+    Container container_;
+    Index index_;
+};
+
+namespace actions {
+
+template<class Container, class Index>
+auto
+erase_index(Container container, Index index)
+{
+    auto index_signal = signalize(std::move(index));
+    return erase_index_action<Container, decltype(index_signal)>(
+        std::move(container), std::move(index_signal));
+}
+
+} // namespace actions
+
+// actions::erase_key(container, key) creates an actions that erases the
+// item associated with :key from :container.
+// :container must be a duplex signal carrying an associative container.
+// :key can be either a raw key or a readable signal carrying a key.
+
+template<class Container, class Key>
+struct erase_key_action : action_interface<>
+{
+    erase_key_action(Container container, Key key)
+        : container_(std::move(container)), key_(std::move(key))
+    {
+    }
+
+    bool
+    is_ready() const
+    {
+        return container_.has_value() && container_.ready_to_write()
+               && key_.has_value();
+    }
+
+    void
+    perform(function_view<void()> const& intermediary) const
+    {
+        auto new_container = forward_signal(alia::move(container_));
+        new_container.erase(read_signal(key_));
+        intermediary();
+        container_.write(std::move(new_container));
+    }
+
+ private:
+    Container container_;
+    Key key_;
+};
+
+namespace actions {
+
+template<class Container, class Key>
+auto
+erase_key(Container container, Key key)
+{
+    auto key_signal = signalize(std::move(key));
+    return erase_key_action<Container, decltype(key_signal)>(
+        std::move(container), std::move(key_signal));
+}
+
+} // namespace actions
+
+// callback(is_ready, perform) creates an action whose behavior is defined by
+// two function objects.
+//
+// :is_ready takes no arguments and simply returns true or false to indicate if
+// the action is ready to be performed.
+//
+// :perform can take any number/type of arguments and defines the signature
+// of the action.
+
+template<class Function>
+struct call_operator_action_signature
+{
+};
+
+template<class T, class R, class... Args>
+struct call_operator_action_signature<R (T::*)(Args...) const>
+{
+    typedef action_interface<Args...> type;
+};
+
+template<class Lambda>
+struct callback_action_signature
+    : call_operator_action_signature<decltype(&Lambda::operator())>
+{
+};
+
+template<class IsReady, class Perform, class Interface>
+struct callback_action;
+
+template<class IsReady, class Perform, class... Args>
+struct callback_action<IsReady, Perform, action_interface<Args...>>
+    : action_interface<Args...>
+{
+    callback_action(IsReady is_ready, Perform perform)
+        : is_ready_(is_ready), perform_(perform)
+    {
+    }
+
+    bool
+    is_ready() const
+    {
+        return is_ready_();
+    }
+
+    void
+    perform(function_view<void()> const& intermediary, Args... args) const
+    {
+        intermediary();
+        perform_(args...);
+    }
+
+ private:
+    IsReady is_ready_;
+    Perform perform_;
+};
+
+template<class IsReady, class Perform>
+auto
+callback(IsReady is_ready, Perform perform)
+{
+    return callback_action<
+        IsReady,
+        Perform,
+        typename callback_action_signature<Perform>::type>(is_ready, perform);
+}
+
+// The single-argument version of callback() creates an action that's always
+// ready to perform.
+template<class Perform>
+auto
+callback(Perform perform)
+{
+    return callback([]() { return true; }, perform);
+}
+
+// actionize(x) returns the action form of x (if it isn't already one).
+// Specifically, if x is a callable object, this returns callback(x).
+// If x is an action, this returns x itself.
+template<class Action>
+std::enable_if_t<is_action_type<Action>::value, Action>
+actionize(Action x)
+{
+    return x;
+}
+template<
+    class Callable,
+    std::enable_if_t<!is_action_type<Callable>::value, int> = 0>
+auto
+actionize(Callable x)
+{
+    return callback(std::move(x));
+}
+
+// add_write_action(signal, on_write) wraps signal in a similar signal that
+// will invoke on_write whenever the signal is written to. (on_write will be
+// passed the value that was written to the signal.)
+template<class Wrapped, class OnWrite>
+struct write_action_signal : signal_wrapper<
+                                 write_action_signal<Wrapped, OnWrite>,
+                                 Wrapped,
+                                 typename Wrapped::value_type,
+                                 typename signal_capabilities_union<
+                                     write_only_signal,
+                                     typename Wrapped::capabilities>::type>
+{
+    write_action_signal(Wrapped wrapped, OnWrite on_write)
+        : write_action_signal::signal_wrapper(std::move(wrapped)),
+          on_write_(std::move(on_write))
+    {
+    }
+    bool
+    ready_to_write() const
+    {
+        return this->wrapped_.ready_to_write() && on_write_.is_ready();
+    }
+    id_interface const&
+    write(typename Wrapped::value_type value) const
+    {
+        perform_action(on_write_, value);
+        return this->wrapped_.write(std::move(value));
+    }
+
+ private:
+    OnWrite on_write_;
+};
+template<class Wrapped, class OnWrite>
+auto
+add_write_action(Wrapped wrapped, OnWrite on_write)
+{
+    return write_action_signal<Wrapped, OnWrite>(
+        std::move(wrapped), std::move(on_write));
+}
+
+// actions::apply(f, state, [args...]), where :state is a signal, creates an
+// action that will apply :f to the value of :state and write the result back
+// to :state. Any :args should also be signals and will be passed along as
+// additional arguments to :f.
+
+namespace actions {
+
+template<class Function, class PrimaryState, class... Args>
+auto
+apply(Function&& f, PrimaryState state, Args... args)
+{
+    return state <<= lazy_apply(
+               std::forward<Function>(f),
+               alia::move(state),
+               std::move(args)...);
+}
+
+} // namespace actions
+
+} // namespace alia
+
+
+
+namespace alia {
+
+struct component_container;
+
+typedef std::shared_ptr<component_container> component_container_ptr;
+
+struct component_container
+{
+    component_container_ptr parent;
+    // The component is dirty and needs to be refreshed immediately.
+    bool dirty = false;
+    // The component is animating and would like to be refreshed soon.
+    bool animating = false;
+};
+
+void
+mark_dirty_component(component_container_ptr const& container);
+
+void
+mark_dirty_component(dataless_context ctx);
+
+void
+mark_animating_component(component_container_ptr const& container);
+
+void
+mark_animating_component(dataless_context ctx);
+
+struct scoped_component_container
+{
+    scoped_component_container()
+    {
+    }
+    scoped_component_container(context ctx)
+    {
+        begin(ctx);
+    }
+    scoped_component_container(context ctx, component_container_ptr* container)
+    {
+        begin(ctx, container);
+    }
+    ~scoped_component_container()
+    {
+        end();
+    }
+
+    void
+    begin(dataless_context ctx, component_container_ptr* container);
+
+    void
+    begin(context ctx);
+
+    void
+    end();
+
+    bool
+    is_on_route() const
+    {
+        return is_on_route_;
+    }
+
+    bool
+    is_dirty() const
+    {
+        return is_dirty_;
+    }
+
+    bool
+    is_animating() const
+    {
+        return is_animating_;
+    }
+
+ private:
+    optional_context<dataless_context> ctx_;
+    component_container_ptr* container_;
+    component_container_ptr* parent_;
+    bool is_on_route_;
+    bool is_dirty_;
+    bool is_animating_;
 };
 
 } // namespace alia
@@ -3449,1338 +4836,6 @@ struct scoped_data_traversal
 
 
 
-
-
-namespace alia {
-
-// signalize(x) turns x into a signal if it isn't already one.
-// Or, in other words...
-// signalize(s), where s is a signal, returns s.
-// signalize(v), where v is a raw value, returns a value signal carrying v.
-template<class Signal>
-std::enable_if_t<is_readable_signal_type<Signal>::value, Signal>
-signalize(Signal s)
-{
-    return std::move(s);
-}
-template<class Value, std::enable_if_t<!is_signal_type<Value>::value, int> = 0>
-auto
-signalize(Value v)
-{
-    return value(std::move(v));
-}
-
-// fake_readability(s), where :s is a signal, yields a wrapper for :s that
-// pretends to have read capabilities. It will never actually have a value, but
-// it will type-check as a readable signal.
-template<class Wrapped>
-struct readability_faker : signal_wrapper<
-                               readability_faker<Wrapped>,
-                               Wrapped,
-                               typename Wrapped::value_type,
-                               typename signal_capabilities_union<
-                                   read_only_signal,
-                                   typename Wrapped::capabilities>::type>
-{
-    readability_faker(Wrapped wrapped)
-        : readability_faker::signal_wrapper(std::move(wrapped))
-    {
-    }
-    id_interface const&
-    value_id() const override
-    {
-        return null_id;
-    }
-    bool
-    has_value() const override
-    {
-        return false;
-    }
-    // Since this is only faking readability, read() should never be called.
-    // LCOV_EXCL_START
-    typename Wrapped::value_type const&
-    read() const override
-    {
-#ifdef __clang__
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wnull-dereference"
-#endif
-        return *(typename Wrapped::value_type const*) nullptr;
-#ifdef __clang__
-#pragma clang diagnostic pop
-#endif
-    }
-    // LCOV_EXCL_STOP
-};
-template<class Wrapped>
-readability_faker<Wrapped>
-fake_readability(Wrapped wrapped)
-{
-    return readability_faker<Wrapped>(std::move(wrapped));
-}
-
-// fake_writability(s), where :s is a signal, yields a wrapper for :s that
-// pretends to have write capabilities. It will never actually be ready to
-// write, but it will type-check as a writable signal.
-template<class Wrapped>
-struct writability_faker : signal_wrapper<
-                               writability_faker<Wrapped>,
-                               Wrapped,
-                               typename Wrapped::value_type,
-                               typename signal_capabilities_union<
-                                   write_only_signal,
-                                   typename Wrapped::capabilities>::type>
-{
-    writability_faker(Wrapped wrapped)
-        : writability_faker::signal_wrapper(std::move(wrapped))
-    {
-    }
-    bool
-    ready_to_write() const override
-    {
-        return false;
-    }
-    // Since this is only faking writability, write() should never be called.
-    // LCOV_EXCL_START
-    void write(typename Wrapped::value_type) const override
-    {
-    }
-    // LCOV_EXCL_STOP
-};
-template<class Wrapped>
-writability_faker<Wrapped>
-fake_writability(Wrapped wrapped)
-{
-    return writability_faker<Wrapped>(std::move(wrapped));
-}
-
-// signal_cast<Value>(x), where :x is a signal, yields a proxy for :x with
-// the value type :Value. The proxy will apply static_casts to convert its
-// own values to and from :x's value type.
-template<class Wrapped, class To>
-struct casting_signal : casting_signal_wrapper<
-                            casting_signal<Wrapped, To>,
-                            Wrapped,
-                            To,
-                            typename signal_capabilities_intersection<
-                                typename Wrapped::capabilities,
-                                move_activated_clearable_signal>::type>
-{
-    casting_signal(Wrapped wrapped)
-        : casting_signal::casting_signal_wrapper(std::move(wrapped))
-    {
-    }
-    To const&
-    read() const override
-    {
-        value_ = this->move_out();
-        return value_;
-    }
-    To
-    move_out() const override
-    {
-        return static_cast<To>(forward_signal(this->wrapped_));
-    }
-    To&
-    destructive_ref() const override
-    {
-        value_ = this->move_out();
-        return value_;
-    }
-    void
-    write(To value) const override
-    {
-        return this->wrapped_.write(
-            static_cast<typename Wrapped::value_type>(value));
-    }
-
- private:
-    mutable To value_;
-};
-// signal_caster is just another level of indirection that allows us to
-// eliminate the casting_signal entirely if it's just going to cast to the same
-// type.
-template<class Wrapped, class To>
-struct signal_caster
-{
-    typedef casting_signal<Wrapped, To> type;
-    static type
-    apply(Wrapped wrapped)
-    {
-        return type(std::move(wrapped));
-    }
-};
-template<class Wrapped>
-struct signal_caster<Wrapped, typename Wrapped::value_type>
-{
-    typedef Wrapped type;
-    static type
-    apply(Wrapped wrapped)
-    {
-        return wrapped;
-    }
-};
-template<class To, class Wrapped>
-typename signal_caster<Wrapped, To>::type
-signal_cast(Wrapped wrapped)
-{
-    return signal_caster<Wrapped, To>::apply(std::move(wrapped));
-}
-
-// has_value(x) yields a signal to a boolean which indicates whether or not :x
-// has a value. (The returned signal itself always has a value.)
-template<class Wrapped>
-struct value_presence_signal
-    : regular_signal<value_presence_signal<Wrapped>, bool, read_only_signal>
-{
-    value_presence_signal(Wrapped wrapped) : wrapped_(std::move(wrapped))
-    {
-    }
-    bool
-    has_value() const override
-    {
-        return true;
-    }
-    bool const&
-    read() const override
-    {
-        value_ = wrapped_.has_value();
-        return value_;
-    }
-
- private:
-    Wrapped wrapped_;
-    mutable bool value_;
-};
-template<class Wrapped>
-auto
-has_value(Wrapped wrapped)
-{
-    return value_presence_signal<Wrapped>(std::move(wrapped));
-}
-
-// ready_to_write(x) yields a signal to a boolean that indicates whether or not
-// :x is ready to write. (The returned signal always has a value.)
-template<class Wrapped>
-struct write_readiness_signal
-    : regular_signal<write_readiness_signal<Wrapped>, bool, read_only_signal>
-{
-    write_readiness_signal(Wrapped wrapped) : wrapped_(std::move(wrapped))
-    {
-    }
-    bool
-    has_value() const override
-    {
-        return true;
-    }
-    bool const&
-    read() const override
-    {
-        value_ = wrapped_.ready_to_write();
-        return value_;
-    }
-
- private:
-    Wrapped wrapped_;
-    mutable bool value_;
-};
-template<class Wrapped>
-auto
-ready_to_write(Wrapped wrapped)
-{
-    return write_readiness_signal<Wrapped>(std::move(wrapped));
-}
-
-// add_default(primary, default), where :primary and :default are both
-// signals, yields another signal whose value is that of :primary if it has one
-// and that of :default otherwise.
-// All writes go directly to :primary.
-template<class Primary, class Default>
-struct default_value_signal
-    : signal_wrapper<
-          default_value_signal<Primary, Default>,
-          Primary,
-          typename Primary::value_type,
-          signal_capabilities<
-              signal_capability_level_intersection<
-                  Primary::capabilities::reading,
-                  Default::capabilities::reading>::value,
-              Primary::capabilities::writing>>
-{
-    default_value_signal()
-    {
-    }
-    default_value_signal(Primary primary, Default default_value)
-        : default_value_signal::signal_wrapper(std::move(primary)),
-          default_(std::move(default_value))
-    {
-    }
-    bool
-    has_value() const override
-    {
-        return this->wrapped_.has_value() || default_.has_value();
-    }
-    typename Primary::value_type const&
-    read() const override
-    {
-        return this->wrapped_.has_value() ? this->wrapped_.read()
-                                          : default_.read();
-    }
-    typename Primary::value_type
-    move_out() const override
-    {
-        return this->wrapped_.has_value() ? this->wrapped_.move_out()
-                                          : default_.move_out();
-    }
-    typename Primary::value_type&
-    destructive_ref() const override
-    {
-        return this->wrapped_.has_value() ? this->wrapped_.destructive_ref()
-                                          : default_.destructive_ref();
-    }
-    id_interface const&
-    value_id() const override
-    {
-        id_ = combine_ids(
-            make_id(this->wrapped_.has_value()),
-            this->wrapped_.has_value() ? ref(this->wrapped_.value_id())
-                                       : ref(default_.value_id()));
-        return id_;
-    }
-
- private:
-    mutable id_pair<simple_id<bool>, id_ref> id_;
-    Default default_;
-};
-template<class Primary, class Default>
-default_value_signal<Primary, Default>
-make_default_value_signal(Primary primary, Default default_)
-{
-    return default_value_signal<Primary, Default>(
-        std::move(primary), std::move(default_));
-}
-template<class Primary, class Default>
-auto
-add_default(Primary primary, Default default_)
-{
-    return make_default_value_signal(
-        signalize(std::move(primary)), signalize(std::move(default_)));
-}
-
-// simplify_id(s), where :s is a signal, yields a wrapper for :s with the exact
-// same read/write behavior but whose value ID is a simple_id (i.e., it is
-// simply the value of the signal).
-//
-// The main utility of this is in cases where you have a signal carrying a
-// small value with a complicated value ID (because it was picked from the
-// signal of a larger data structure, for example). The more complicated ID
-// might change superfluously.
-//
-template<class Wrapped>
-struct simplified_id_wrapper
-    : signal_wrapper<simplified_id_wrapper<Wrapped>, Wrapped>
-{
-    simplified_id_wrapper(Wrapped wrapped)
-        : simplified_id_wrapper::signal_wrapper(std::move(wrapped))
-    {
-    }
-    id_interface const&
-    value_id() const override
-    {
-        if (this->has_value())
-        {
-            id_ = make_id_by_reference(this->read());
-            return id_;
-        }
-        return null_id;
-    }
-
- private:
-    mutable simple_id_by_reference<typename Wrapped::value_type> id_;
-};
-template<class Wrapped>
-simplified_id_wrapper<Wrapped>
-simplify_id(Wrapped wrapped)
-{
-    return simplified_id_wrapper<Wrapped>(std::move(wrapped));
-}
-
-// mask(signal, availibility_flag) does the equivalent of bit masking on
-// individual signals. If :availibility_flag evaluates to true, the mask
-// evaluates to a signal equivalent to :signal. Otherwise, it evaluates to an
-// empty signal of the same type.
-template<class Primary, class Mask>
-struct masking_signal : signal_wrapper<masking_signal<Primary, Mask>, Primary>
-{
-    masking_signal()
-    {
-    }
-    masking_signal(Primary primary, Mask mask)
-        : masking_signal::signal_wrapper(std::move(primary)),
-          mask_(std::move(mask))
-    {
-    }
-    bool
-    has_value() const override
-    {
-        return mask_.has_value() && mask_.read() && this->wrapped_.has_value();
-    }
-    id_interface const&
-    value_id() const override
-    {
-        if (mask_.has_value() && mask_.read())
-            return this->wrapped_.value_id();
-        else
-            return null_id;
-    }
-    bool
-    ready_to_write() const override
-    {
-        return mask_.has_value() && mask_.read()
-               && this->wrapped_.ready_to_write();
-    }
-
- private:
-    Mask mask_;
-};
-template<class Signal, class AvailabilityFlag>
-auto
-make_masking_signal(Signal signal, AvailabilityFlag availability_flag)
-{
-    return masking_signal<Signal, AvailabilityFlag>(
-        std::move(signal), std::move(availability_flag));
-}
-template<class Signal, class AvailabilityFlag>
-auto
-mask(Signal signal, AvailabilityFlag availability_flag)
-{
-    return make_masking_signal(
-        signalize(std::move(signal)), signalize(std::move(availability_flag)));
-}
-
-// mask_writes(signal, writability_flag) masks writes to :signal according to
-// the value of :writability_flag.
-//
-// :writability_flag can be either a signal or a raw value. If it evaluates to
-// true (in a boolean context), the mask evaluates to a signal equivalent to
-// :signal. Otherwise, it evaluates to one with equivalent reading behavior but
-// with writing disabled.
-//
-// Note that in either case, the masked version has the same capabilities as
-// :signal.
-//
-template<class Primary, class Mask>
-struct write_masking_signal
-    : signal_wrapper<write_masking_signal<Primary, Mask>, Primary>
-{
-    write_masking_signal()
-    {
-    }
-    write_masking_signal(Primary primary, Mask mask)
-        : write_masking_signal::signal_wrapper(std::move(primary)),
-          mask_(std::move(mask))
-    {
-    }
-    bool
-    ready_to_write() const override
-    {
-        return mask_.has_value() && mask_.read()
-               && this->wrapped_.ready_to_write();
-    }
-
- private:
-    Mask mask_;
-};
-template<class Signal, class WritabilityFlag>
-auto
-make_write_masking_signal(Signal signal, WritabilityFlag writability_flag)
-{
-    return write_masking_signal<Signal, WritabilityFlag>(
-        std::move(signal), std::move(writability_flag));
-}
-template<class Signal, class WritabilityFlag>
-auto
-mask_writes(Signal signal, WritabilityFlag writability_flag)
-{
-    return make_write_masking_signal(
-        std::move(signal), signalize(std::move(writability_flag)));
-}
-
-// disable_writes(s), where :s is a signal, yields a wrapper for :s where
-// writes are disabled. Like mask_writes, this doesn't change the capabilities
-// of :s.
-template<class Signal>
-auto
-disable_writes(Signal s)
-{
-    return mask_writes(std::move(s), false);
-}
-
-// mask_reads(signal, readality_flag) masks reads to :signal according to the
-// value of :readality_flag.
-//
-// :readality_flag can be either a signal or a raw value. If it evaluates to
-// true (in a boolean context), the mask evaluates to a signal equivalent to
-// :signal. Otherwise, it evaluates to one with equivalent writing behavior but
-// with reading disabled.
-//
-// Note that in either case, the masked version has the same capabilities as
-// :signal.
-//
-template<class Primary, class Mask>
-struct read_masking_signal
-    : signal_wrapper<read_masking_signal<Primary, Mask>, Primary>
-{
-    read_masking_signal()
-    {
-    }
-    read_masking_signal(Primary primary, Mask mask)
-        : read_masking_signal::signal_wrapper(std::move(primary)),
-          mask_(std::move(mask))
-    {
-    }
-    bool
-    has_value() const override
-    {
-        return mask_.has_value() && mask_.read() && this->wrapped_.has_value();
-    }
-
- private:
-    Mask mask_;
-};
-template<class Signal, class ReadabilityFlag>
-auto
-make_read_masking_signal(Signal signal, ReadabilityFlag readability_flag)
-{
-    return read_masking_signal<Signal, ReadabilityFlag>(
-        std::move(signal), std::move(readability_flag));
-}
-template<class Signal, class ReadabilityFlag>
-auto
-mask_reads(Signal signal, ReadabilityFlag readability_flag)
-{
-    return make_read_masking_signal(
-        std::move(signal), signalize(std::move(readability_flag)));
-}
-
-// disable_reads(s), where :s is a signal, yields a wrapper for :s where reads
-// are disabled. Like mask_reads, this doesn't change the capabilities of :s.
-template<class Signal>
-auto
-disable_reads(Signal s)
-{
-    return mask_reads(std::move(s), false);
-}
-
-// unwrap(signal), where :signal is a signal carrying a std::optional value,
-// yields a signal that directly carries the value wrapped inside the optional.
-
-template<class OptionalCapabilities>
-struct unwrapper_signal_capabilities
-{
-};
-template<unsigned Reading, unsigned Writing>
-struct unwrapper_signal_capabilities<signal_capabilities<Reading, Writing>>
-{
-    // If the std::optional signal is writable, then the 'unwrapped' signal
-    // is clearable.
-    typedef signal_capabilities<Reading, signal_clearable> type;
-};
-template<unsigned Reading>
-struct unwrapper_signal_capabilities<
-    signal_capabilities<Reading, signal_unwritable>>
-{
-    // If the std::optional signal is NOT writable, then the 'unwrapped' signal
-    // also isn't.
-    typedef signal_capabilities<Reading, signal_unwritable> type;
-};
-
-template<class Wrapped>
-struct unwrapper_signal : casting_signal_wrapper<
-                              unwrapper_signal<Wrapped>,
-                              Wrapped,
-                              typename Wrapped::value_type::value_type,
-                              typename unwrapper_signal_capabilities<
-                                  typename Wrapped::capabilities>::type>
-{
-    unwrapper_signal()
-    {
-    }
-    unwrapper_signal(Wrapped wrapped)
-        : unwrapper_signal::casting_signal_wrapper(std::move(wrapped))
-    {
-    }
-    bool
-    has_value() const override
-    {
-        return this->wrapped_.has_value() && this->wrapped_.read().has_value();
-    }
-    typename Wrapped::value_type::value_type const&
-    read() const override
-    {
-        return this->wrapped_.read().value();
-    }
-    typename Wrapped::value_type::value_type
-    move_out() const override
-    {
-        return *this->wrapped_.move_out();
-    }
-    typename Wrapped::value_type::value_type&
-    destructive_ref() const override
-    {
-        return *this->wrapped_.destructive_ref();
-    }
-    id_interface const&
-    value_id() const override
-    {
-        if (this->has_value())
-            return this->wrapped_.value_id();
-        else
-            return null_id;
-    }
-    void
-    write(typename Wrapped::value_type::value_type value) const override
-    {
-        this->wrapped_.write(std::move(value));
-    }
-    void
-    clear() const override
-    {
-        this->wrapped_.write(typename Wrapped::value_type());
-    }
-};
-template<class Signal>
-auto
-unwrap(Signal signal)
-{
-    return unwrapper_signal<Signal>(std::move(signal));
-}
-
-// move(signal) returns a signal with movement activated (if possible).
-//
-// If the input signal supports movement, the returned signal's value can be
-// moved out with move_signal() or forward_signal().
-//
-// If the input signal doesn't support movement, it's returned unchanged.
-//
-template<class Wrapped>
-struct signal_movement_activator : signal_wrapper<
-                                       signal_movement_activator<Wrapped>,
-                                       Wrapped,
-                                       typename Wrapped::value_type,
-                                       signal_capabilities<
-                                           signal_move_activated,
-                                           Wrapped::capabilities::writing>>
-{
-    signal_movement_activator()
-    {
-    }
-    signal_movement_activator(Wrapped wrapped)
-        : signal_movement_activator::signal_wrapper(std::move(wrapped))
-    {
-    }
-};
-template<
-    class Signal,
-    std::enable_if_t<is_movable_signal_type<Signal>::value, int> = 0>
-auto
-move(Signal signal)
-{
-    return signal_movement_activator<Signal>(std::move(signal));
-}
-template<
-    class Signal,
-    std::enable_if_t<
-        is_signal_type<Signal>::value && signal_is_readable<Signal>::value
-            && !signal_is_movable<Signal>::value,
-        int> = 0>
-auto
-move(Signal signal)
-{
-    return signal;
-}
-
-} // namespace alia
-
-
-// This file defines the alia action interface, some common implementations of
-// it, and some utilities for working with it.
-//
-// An action is essentially a response to an event that's dispatched by alia.
-// When specifying a component that can generate events, the application
-// supplies the action that should be performed when the corresponding event is
-// generated. Using this style allows event handling to be written in a safer
-// and more declarative manner.
-//
-// Actions are very similar to signals in the way that they are used in an
-// application. Like signals, they're typically created directly at the call
-// site as function arguments and are only valid for the life of the function
-// call.
-
-namespace alia {
-
-// untyped_action_interface defines functionality common to all actions,
-// irrespective of the type of arguments that the action takes.
-struct untyped_action_interface
-{
-    // Is this action ready to be performed?
-    virtual bool
-    is_ready() const = 0;
-};
-
-template<class... Args>
-struct action_interface : untyped_action_interface
-{
-    // Perform this action.
-    //
-    // :intermediary is used to implement the latch-like semantics of actions.
-    // It should be invoked AFTER reading any signals you need to read but
-    // BEFORE invoking any side effects.
-    //
-    virtual void
-    perform(function_view<void()> const& intermediary, Args... args) const = 0;
-};
-
-// is_action_type<T>::value yields a compile-time boolean indicating whether or
-// not T is an alia action type.
-template<class T>
-struct is_action_type : std::is_base_of<untyped_action_interface, T>
-{
-};
-
-// Is the given action ready?
-template<class... Args>
-bool
-action_is_ready(action_interface<Args...> const& action)
-{
-    return action.is_ready();
-}
-
-// Perform an action.
-template<class... Args>
-void
-perform_action(action_interface<Args...> const& action, Args... args)
-{
-    if (action.is_ready())
-        action.perform([]() {}, std::move(args)...);
-}
-
-// action_ref is a reference to an action that implements the action interface
-// itself.
-template<class... Args>
-struct action_ref : action_interface<Args...>
-{
-    // Construct from a reference to another action.
-    action_ref(action_interface<Args...> const& ref) : action_(&ref)
-    {
-    }
-    // Construct from another action_ref. - This is meant to prevent
-    // unnecessary layers of indirection.
-    action_ref(action_ref<Args...> const& other) : action_(other.action_)
-    {
-    }
-
-    bool
-    is_ready() const
-    {
-        return action_->is_ready();
-    }
-
-    void
-    perform(function_view<void()> const& intermediary, Args... args) const
-    {
-        action_->perform(intermediary, std::move(args)...);
-    }
-
- private:
-    action_interface<Args...> const* action_;
-};
-
-template<class... Args>
-using action = action_ref<Args...>;
-
-// comma operator
-//
-// Using the comma operator between two actions creates a combined action that
-// performs the two actions in sequence.
-
-template<class First, class Second, class Interface>
-struct action_pair;
-
-template<class First, class Second, class... Args>
-struct action_pair<First, Second, action_interface<Args...>>
-    : action_interface<Args...>
-{
-    action_pair(First first, Second second)
-        : first_(std::move(first)), second_(std::move(second))
-    {
-    }
-
-    bool
-    is_ready() const
-    {
-        return first_.is_ready() && second_.is_ready();
-    }
-
-    void
-    perform(function_view<void()> const& intermediary, Args... args) const
-    {
-        second_.perform(
-            [&]() { first_.perform(intermediary, args...); }, args...);
-    }
-
- private:
-    First first_;
-    Second second_;
-};
-
-template<
-    class First,
-    class Second,
-    std::enable_if_t<
-        is_action_type<First>::value && is_action_type<Second>::value,
-        int> = 0>
-auto
-operator,(First first, Second second)
-{
-    return action_pair<First, Second, typename First::action_interface>(
-        std::move(first), std::move(second));
-}
-
-// operator <<
-//
-// (a << s), where a is an action and s is a readable signal, returns another
-// action that is like :a but with the value of :s bound to its first argument.
-//
-template<class Action, class Signal, class Interface>
-struct bound_action;
-template<class Action, class Signal, class BoundArg, class... Args>
-struct bound_action<Action, Signal, action_interface<BoundArg, Args...>>
-    : action_interface<Args...>
-{
-    bound_action(Action action, Signal signal)
-        : action_(std::move(action)), signal_(std::move(signal))
-    {
-    }
-
-    bool
-    is_ready() const
-    {
-        return action_.is_ready() && signal_.has_value();
-    }
-
-    void
-    perform(function_view<void()> const& intermediary, Args... args) const
-    {
-        action_.perform(
-            intermediary, forward_signal(signal_), std::move(args)...);
-    }
-
- private:
-    Action action_;
-    Signal signal_;
-};
-template<
-    class Action,
-    class Signal,
-    std::enable_if_t<
-        is_action_type<Action>::value
-            && is_readable_signal_type<Signal>::value,
-        int> = 0>
-auto
-operator<<(Action action, Signal signal)
-{
-    return bound_action<Action, Signal, typename Action::action_interface>(
-        std::move(action), std::move(signal));
-}
-template<
-    class Action,
-    class Value,
-    std::enable_if_t<
-        is_action_type<Action>::value && !is_signal_type<Value>::value,
-        int> = 0>
-auto
-operator<<(Action action, Value v)
-{
-    return std::move(action) << value(std::move(v));
-}
-
-// operator <<=
-//
-// sink <<= source, where :sink and :source are both signals, creates an
-// action that will set the value of :sink to the value held in :source. In
-// order for the action to be considered ready, :source must have a value and
-// :sink must be ready to write.
-
-template<class Sink, class Source>
-struct copy_action : action_interface<>
-{
-    copy_action(Sink sink, Source source)
-        : sink_(std::move(sink)), source_(std::move(source))
-    {
-    }
-
-    bool
-    is_ready() const
-    {
-        return source_.has_value() && sink_.ready_to_write();
-    }
-
-    void
-    perform(function_view<void()> const& intermediary) const
-    {
-        typename Source::value_type source_value = forward_signal(source_);
-        intermediary();
-        sink_.write(std::move(source_value));
-    }
-
- private:
-    Sink sink_;
-    Source source_;
-};
-
-template<
-    class Sink,
-    class Source,
-    std::enable_if_t<
-        is_writable_signal_type<Sink>::value
-            && is_readable_signal_type<Source>::value,
-        int> = 0>
-auto
-operator<<=(Sink sink, Source source)
-{
-    return copy_action<Sink, Source>(std::move(sink), std::move(source));
-}
-
-template<
-    class Sink,
-    class Source,
-    std::enable_if_t<
-        is_writable_signal_type<Sink>::value && !is_signal_type<Source>::value,
-        int> = 0>
-auto
-operator<<=(Sink sink, Source source)
-{
-    return sink <<= value(source);
-}
-
-// The noop action is always ready to perform but does nothing.
-
-template<class... Args>
-struct noop_action : action_interface<Args...>
-{
-    noop_action()
-    {
-    }
-
-    bool
-    is_ready() const
-    {
-        return true;
-    }
-
-    void
-    perform(function_view<void()> const& intermediary, Args...) const
-    {
-        intermediary();
-    }
-};
-
-namespace actions {
-
-template<class... Args>
-noop_action<Args...>
-noop()
-{
-    return noop_action<Args...>();
-}
-
-} // namespace actions
-
-// The unready action is never ready to perform.
-
-template<class... Args>
-struct unready_action : action_interface<Args...>
-{
-    unready_action()
-    {
-    }
-
-    bool
-    is_ready() const
-    {
-        return false;
-    }
-
-    // LCOV_EXCL_START
-    void
-    perform(function_view<void()> const&, Args...) const
-    {
-        // This action is never supposed to be performed!
-        assert(0);
-    }
-    // LCOV_EXCL_STOP
-};
-
-namespace actions {
-
-template<class... Args>
-unready_action<Args...>
-unready()
-{
-    return unready_action<Args...>();
-}
-
-} // namespace actions
-
-// actions::toggle(flag), where :flag is a signal to a boolean, creates an
-// action that will toggle the value of :flag between true and false.
-//
-// Note that this could also be used with other value types as long as the !
-// operator provides a reasonable "toggle" function.
-
-namespace actions {
-
-template<class Flag>
-auto
-toggle(Flag flag)
-{
-    return flag <<= !flag;
-}
-
-} // namespace actions
-
-// actions::push_back(container), where :container is a signal, creates an
-// action that takes an item as a parameter and pushes it onto the back of
-// :container.
-
-template<class Container, class Item>
-struct push_back_action : action_interface<Item>
-{
-    push_back_action(Container container) : container_(std::move(container))
-    {
-    }
-
-    bool
-    is_ready() const
-    {
-        return container_.has_value() && container_.ready_to_write();
-    }
-
-    void
-    perform(function_view<void()> const& intermediary, Item item) const
-    {
-        auto new_container = forward_signal(alia::move(container_));
-        new_container.push_back(std::move(item));
-        intermediary();
-        container_.write(std::move(new_container));
-    }
-
- private:
-    Container container_;
-};
-
-namespace actions {
-
-template<class Container>
-auto
-push_back(Container container)
-{
-    return push_back_action<
-        Container,
-        typename Container::value_type::value_type>(std::move(container));
-}
-
-} // namespace actions
-
-// actions::erase_index(container, index) creates an actions that erases the
-// item at :index from :container.
-// :container must be a duplex signal carrying a container.
-// :index can be either a raw size_t or a readable signal carrying a size_t.
-
-template<class Container, class Index>
-struct erase_index_action : action_interface<>
-{
-    erase_index_action(Container container, Index index)
-        : container_(std::move(container)), index_(std::move(index))
-    {
-    }
-
-    bool
-    is_ready() const
-    {
-        return container_.has_value() && container_.ready_to_write()
-               && index_.has_value();
-    }
-
-    void
-    perform(function_view<void()> const& intermediary) const
-    {
-        auto new_container = forward_signal(alia::move(container_));
-        new_container.erase(new_container.begin() + read_signal(index_));
-        intermediary();
-        container_.write(std::move(new_container));
-    }
-
- private:
-    Container container_;
-    Index index_;
-};
-
-namespace actions {
-
-template<class Container, class Index>
-auto
-erase_index(Container container, Index index)
-{
-    auto index_signal = signalize(std::move(index));
-    return erase_index_action<Container, decltype(index_signal)>(
-        std::move(container), std::move(index_signal));
-}
-
-} // namespace actions
-
-// callback(is_ready, perform) creates an action whose behavior is defined by
-// two function objects.
-//
-// :is_ready takes no arguments and simply returns true or false to indicate if
-// the action is ready to be performed.
-//
-// :perform can take any number/type of arguments and defines the signature
-// of the action.
-
-template<class Function>
-struct call_operator_action_signature
-{
-};
-
-template<class T, class R, class... Args>
-struct call_operator_action_signature<R (T::*)(Args...) const>
-{
-    typedef action_interface<Args...> type;
-};
-
-template<class Lambda>
-struct callback_action_signature
-    : call_operator_action_signature<decltype(&Lambda::operator())>
-{
-};
-
-template<class IsReady, class Perform, class Interface>
-struct callback_action;
-
-template<class IsReady, class Perform, class... Args>
-struct callback_action<IsReady, Perform, action_interface<Args...>>
-    : action_interface<Args...>
-{
-    callback_action(IsReady is_ready, Perform perform)
-        : is_ready_(is_ready), perform_(perform)
-    {
-    }
-
-    bool
-    is_ready() const
-    {
-        return is_ready_();
-    }
-
-    void
-    perform(function_view<void()> const& intermediary, Args... args) const
-    {
-        intermediary();
-        perform_(args...);
-    }
-
- private:
-    IsReady is_ready_;
-    Perform perform_;
-};
-
-template<class IsReady, class Perform>
-auto
-callback(IsReady is_ready, Perform perform)
-{
-    return callback_action<
-        IsReady,
-        Perform,
-        typename callback_action_signature<Perform>::type>(is_ready, perform);
-}
-
-// The single-argument version of callback() creates an action that's always
-// ready to perform.
-template<class Perform>
-auto
-callback(Perform perform)
-{
-    return callback([]() { return true; }, perform);
-}
-
-// actionize(x) returns the action form of x (if it isn't already one).
-// Specifically, if x is a callable object, this returns callback(x).
-// If x is an action, this returns x itself.
-template<class Action>
-std::enable_if_t<is_action_type<Action>::value, Action>
-actionize(Action x)
-{
-    return x;
-}
-template<
-    class Callable,
-    std::enable_if_t<!is_action_type<Callable>::value, int> = 0>
-auto
-actionize(Callable x)
-{
-    return callback(std::move(x));
-}
-
-// add_write_action(signal, on_write) wraps signal in a similar signal that
-// will invoke on_write whenever the signal is written to. (on_write will be
-// passed the value that was written to the signal.)
-template<class Wrapped, class OnWrite>
-struct write_action_signal : signal_wrapper<
-                                 write_action_signal<Wrapped, OnWrite>,
-                                 Wrapped,
-                                 typename Wrapped::value_type,
-                                 typename signal_capabilities_union<
-                                     write_only_signal,
-                                     typename Wrapped::capabilities>::type>
-{
-    write_action_signal(Wrapped wrapped, OnWrite on_write)
-        : write_action_signal::signal_wrapper(std::move(wrapped)),
-          on_write_(std::move(on_write))
-    {
-    }
-    bool
-    ready_to_write() const
-    {
-        return this->wrapped_.ready_to_write() && on_write_.is_ready();
-    }
-    void
-    write(typename Wrapped::value_type value) const
-    {
-        perform_action(on_write_, value);
-        this->wrapped_.write(std::move(value));
-    }
-
- private:
-    OnWrite on_write_;
-};
-template<class Wrapped, class OnWrite>
-auto
-add_write_action(Wrapped wrapped, OnWrite on_write)
-{
-    return write_action_signal<Wrapped, OnWrite>(
-        std::move(wrapped), std::move(on_write));
-}
-
-// actions::apply(f, state, [args...]), where :state is a signal, creates an
-// action that will apply :f to the value of :state and write the result back
-// to :state. Any :args should also be signals and will be passed along as
-// additional arguments to :f.
-
-namespace actions {
-
-template<class Function, class PrimaryState, class... Args>
-auto
-apply(Function&& f, PrimaryState state, Args... args)
-{
-    return state <<= lazy_apply(
-               std::forward<Function>(f),
-               alia::move(state),
-               std::move(args)...);
-}
-
-} // namespace actions
-
-} // namespace alia
-
-
-
-namespace alia {
-
-struct component_container;
-
-typedef std::shared_ptr<component_container> component_container_ptr;
-
-struct component_container
-{
-    component_container_ptr parent;
-    // The component is dirty and needs to be refreshed immediately.
-    bool dirty = false;
-    // The component is animating and would like to be refreshed soon.
-    bool animating = false;
-};
-
-void
-mark_dirty_component(component_container_ptr const& container);
-
-void
-mark_dirty_component(dataless_context ctx);
-
-void
-mark_animating_component(component_container_ptr const& container);
-
-void
-mark_animating_component(dataless_context ctx);
-
-struct scoped_component_container
-{
-    scoped_component_container()
-    {
-    }
-    scoped_component_container(context ctx)
-    {
-        begin(ctx);
-    }
-    scoped_component_container(context ctx, component_container_ptr* container)
-    {
-        begin(ctx, container);
-    }
-    ~scoped_component_container()
-    {
-        end();
-    }
-
-    void
-    begin(dataless_context ctx, component_container_ptr* container);
-
-    void
-    begin(context ctx);
-
-    void
-    end();
-
-    bool
-    is_on_route() const
-    {
-        return is_on_route_;
-    }
-
-    bool
-    is_dirty() const
-    {
-        return is_dirty_;
-    }
-
-    bool
-    is_animating() const
-    {
-        return is_animating_;
-    }
-
- private:
-    optional_context<dataless_context> ctx_;
-    component_container_ptr* container_;
-    component_container_ptr* parent_;
-    bool is_on_route_;
-    bool is_dirty_;
-    bool is_animating_;
-};
-
-} // namespace alia
-
-
-
 namespace alia {
 
 // The following are utilities that are used to implement the control flow
@@ -5336,7 +5391,7 @@ detect_event(dataless_context ctx, Event** event)
 
 template<class Event, class Context, class Handler>
 void
-on_event(Context ctx, Handler&& handler)
+event_handler(Context ctx, Handler&& handler)
 {
     Event* e;
     ALIA_UNTRACKED_IF(detect_event(ctx, &e))
@@ -5407,7 +5462,7 @@ detect_targeted_event(dataless_context ctx, component_id id, Event** event)
 
 template<class Event, class Context, class Handler>
 void
-on_targeted_event(Context ctx, component_id id, Handler&& handler)
+targeted_event_handler(Context ctx, component_id id, Handler&& handler)
 {
     Event* e;
     ALIA_UNTRACKED_IF(detect_targeted_event(ctx, id, &e))
@@ -5432,7 +5487,7 @@ is_refresh_event(dataless_context ctx)
 
 template<class Context, class Handler>
 void
-on_refresh(Context ctx, Handler handler)
+refresh_handler(Context ctx, Handler handler)
 {
     ALIA_UNTRACKED_IF(is_refresh_event(ctx))
     {
@@ -5594,3353 +5649,7 @@ on_observed_value_loss(context ctx, Signal const& signal, action<> on_loss)
 } // namespace alia
 
 
-namespace alia {
 
-// lazy_apply(f, args...), where :args are all signals, yields a signal
-// to the result of lazily applying the function :f to the values of :args.
-
-// Note that doing this in true variadic fashion is a little insane, so I'm
-// just doing the two overloads I need for now...
-
-template<class Result, class Function, class Arg>
-struct lazy_apply1_signal : lazy_signal<
-                                lazy_apply1_signal<Result, Function, Arg>,
-                                Result,
-                                move_activated_signal>
-{
-    lazy_apply1_signal(Function f, Arg arg)
-        : f_(std::move(f)), arg_(std::move(arg))
-    {
-    }
-    id_interface const&
-    value_id() const
-    {
-        return arg_.value_id();
-    }
-    bool
-    has_value() const
-    {
-        return arg_.has_value();
-    }
-    Result
-    move_out() const
-    {
-        return f_(forward_signal(arg_));
-    }
-
- private:
-    Function f_;
-    Arg arg_;
-};
-template<class Function, class Arg>
-auto
-lazy_apply(Function f, Arg arg)
-{
-    return lazy_apply1_signal<decltype(f(forward_signal(arg))), Function, Arg>(
-        std::move(f), std::move(arg));
-}
-
-template<class Result, class Function, class Arg0, class Arg1>
-struct lazy_apply2_signal
-    : lazy_signal<
-          lazy_apply2_signal<Result, Function, Arg0, Arg1>,
-          Result,
-          move_activated_signal>
-{
-    lazy_apply2_signal(Function f, Arg0 arg0, Arg1 arg1)
-        : f_(std::move(f)), arg0_(std::move(arg0)), arg1_(std::move(arg1))
-    {
-    }
-    id_interface const&
-    value_id() const
-    {
-        id_ = combine_ids(ref(arg0_.value_id()), ref(arg1_.value_id()));
-        return id_;
-    }
-    bool
-    has_value() const
-    {
-        return arg0_.has_value() && arg1_.has_value();
-    }
-    Result
-    move_out() const
-    {
-        return f_(forward_signal(arg0_), forward_signal(arg1_));
-    }
-
- private:
-    Function f_;
-    Arg0 arg0_;
-    Arg1 arg1_;
-    mutable id_pair<id_ref, id_ref> id_;
-};
-template<class Function, class Arg0, class Arg1>
-auto
-lazy_apply(Function f, Arg0 arg0, Arg1 arg1)
-{
-    return lazy_apply2_signal<
-        decltype(f(forward_signal(arg0), forward_signal(arg1))),
-        Function,
-        Arg0,
-        Arg1>(f, std::move(arg0), std::move(arg1));
-}
-
-template<class Function>
-auto
-lazy_lift(Function f)
-{
-    return [=](auto... args) { return lazy_apply(f, std::move(args)...); };
-}
-
-// duplex_lazy_apply(forward, reverse, arg), where :arg is a duplex signal,
-// yields another duplex signal whose value is the result of applying :forward
-// to the value of :arg. Writing to the resulting signal applies :reverse and
-// writes the result to :arg.
-// The applications in both directions are done lazily, on demand.
-
-namespace detail {
-
-template<class Result, class Forward, class Reverse, class Arg>
-struct lazy_duplex_apply_signal
-    : lazy_signal<
-          lazy_duplex_apply_signal<Result, Forward, Reverse, Arg>,
-          Result,
-          move_activated_duplex_signal>
-{
-    lazy_duplex_apply_signal(Forward forward, Reverse reverse, Arg arg)
-        : forward_(std::move(forward)),
-          reverse_(std::move(reverse)),
-          arg_(std::move(arg))
-    {
-    }
-    id_interface const&
-    value_id() const
-    {
-        return arg_.value_id();
-    }
-    bool
-    has_value() const
-    {
-        return arg_.has_value();
-    }
-    Result
-    move_out() const
-    {
-        return forward_(forward_signal(arg_));
-    }
-    bool
-    ready_to_write() const
-    {
-        return arg_.ready_to_write();
-    }
-    void
-    write(Result value) const
-    {
-        arg_.write(reverse_(std::move(value)));
-    }
-
- private:
-    Forward forward_;
-    Reverse reverse_;
-    Arg arg_;
-};
-
-} // namespace detail
-
-template<class Forward, class Reverse, class Arg>
-auto
-lazy_duplex_apply(Forward forward, Reverse reverse, Arg arg)
-{
-    return detail::lazy_duplex_apply_signal<
-        decltype(forward(forward_signal(arg))),
-        Forward,
-        Reverse,
-        Arg>(std::move(forward), std::move(reverse), std::move(arg));
-}
-
-// apply(ctx, f, args...), where :args are all signals, yields a signal to the
-// result of applying the function :f to the values of :args. Unlike
-// lazy_apply, this is eager and caches and the result.
-
-namespace detail {
-
-enum class apply_status
-{
-    // The value hasn't been computed since the last time the inputs changed.
-    UNCOMPUTED,
-    // The calculation for the current value threw an exception.
-    FAILED,
-    // The value is calculated and up-to-date.
-    READY,
-    // The value was calculated but was subsequently moved out or accessed in
-    // a destructive manner. This is an in between state that should only
-    // exist in the middle of an action. The value is there, but probably isn't
-    // whole enough to be considered valid, so it should be recomputed on the
-    // next refresh.
-    MOVED
-};
-
-template<class Value>
-struct apply_result_data
-{
-    apply_status status = apply_status::UNCOMPUTED;
-    // This is used to identify the result of the apply. It's incremented every
-    // time the inputs change.
-    counter_type version = 0;
-    // If status is READY, this is the result.
-    Value value;
-    // If status is FAILED, this is the error.
-    std::exception_ptr error;
-};
-
-template<class Value>
-void
-reset(apply_result_data<Value>& data)
-{
-    ++data.version;
-    data.status = apply_status::UNCOMPUTED;
-}
-
-} // namespace detail
-
-template<class Value>
-struct apply_signal
-    : signal<apply_signal<Value>, Value, movable_read_only_signal>
-{
-    apply_signal(detail::apply_result_data<Value>& data) : data_(&data)
-    {
-    }
-    id_interface const&
-    value_id() const
-    {
-        id_ = make_id(data_->version);
-        return id_;
-    }
-    bool
-    has_value() const
-    {
-        return data_->status == detail::apply_status::READY
-               || data_->status == detail::apply_status::MOVED;
-    }
-    Value const&
-    read() const
-    {
-        return data_->value;
-    }
-    Value
-    move_out() const
-    {
-        auto moved_out = std::move(data_->value);
-        data_->status = detail::apply_status::MOVED;
-        return moved_out;
-    }
-    Value&
-    destructive_ref() const
-    {
-        data_->status = detail::apply_status::MOVED;
-        return data_->value;
-    }
-
- private:
-    detail::apply_result_data<Value>* data_;
-    mutable simple_id<counter_type> id_;
-};
-
-namespace detail {
-
-template<class Value>
-apply_signal<Value>
-make_apply_signal(apply_result_data<Value>& data)
-{
-    return apply_signal<Value>(data);
-}
-
-template<class Result, class Arg>
-void
-process_apply_arg(
-    context ctx,
-    apply_result_data<Result>& data,
-    bool& args_ready,
-    captured_id& cached_id,
-    Arg const& arg)
-{
-    if (is_refresh_event(ctx))
-    {
-        if (!signal_has_value(arg))
-        {
-            reset(data);
-            args_ready = false;
-        }
-        else if (!cached_id.matches(arg.value_id()))
-        {
-            reset(data);
-            cached_id.capture(arg.value_id());
-        }
-    }
-}
-
-template<class Result>
-void
-process_apply_args(context, apply_result_data<Result>&, bool&)
-{
-}
-template<class Result, class Arg, class... Rest>
-void
-process_apply_args(
-    context ctx,
-    apply_result_data<Result>& data,
-    bool& args_ready,
-    Arg const& arg,
-    Rest const&... rest)
-{
-    captured_id* cached_id;
-    get_cached_data(ctx, &cached_id);
-    process_apply_arg(ctx, data, args_ready, *cached_id, arg);
-    process_apply_args(ctx, data, args_ready, rest...);
-}
-
-template<class Value, class Function, class... Args>
-void
-process_apply_body(
-    context ctx,
-    apply_result_data<Value>& data,
-    bool args_ready,
-    Function&& f,
-    Args const&... args)
-{
-    if (is_refresh_event(ctx))
-    {
-        if ((data.status == apply_status::UNCOMPUTED
-             || data.status == apply_status::MOVED)
-            && args_ready)
-        {
-            try
-            {
-                data.value
-                    = std::forward<Function>(f)(forward_signal(args)...);
-                data.status = apply_status::READY;
-            }
-            catch (...)
-            {
-                data.error = std::current_exception();
-                data.status = apply_status::FAILED;
-            }
-        }
-        if (data.status == apply_status::FAILED)
-            std::rethrow_exception(data.error);
-    }
-}
-
-} // namespace detail
-
-template<class Function, class... Args>
-auto
-apply(context ctx, Function&& f, Args const&... args)
-{
-    detail::apply_result_data<decltype(f(forward_signal(args)...))>* data_ptr;
-    get_cached_data(ctx, &data_ptr);
-    auto& data = *data_ptr;
-    bool args_ready = true;
-    process_apply_args(ctx, data, args_ready, args...);
-    process_apply_body(
-        ctx, data, args_ready, std::forward<Function>(f), args...);
-    return detail::make_apply_signal(data);
-}
-
-template<class Function>
-auto
-lift(Function f)
-{
-    return [=](context ctx, auto&&... args) {
-        return apply(ctx, std::move(f), std::move(args)...);
-    };
-}
-
-// duplex_apply(ctx, forward, reverse, arg), where :arg is a duplex signal,
-// yields another duplex signal whose value is the result of applying :forward
-// to the value of :arg. Writing to the resulting signal applies :reverse and
-// writes the result to :arg.
-// Similar to apply(ctx, f, arg), this is eager and caches the forward result.
-
-namespace detail {
-
-template<class Value>
-struct duplex_apply_data
-{
-    apply_result_data<Value> result;
-    captured_id input_id;
-};
-
-template<class Value, class Input, class Reverse>
-struct duplex_apply_signal : signal<
-                                 duplex_apply_signal<Value, Input, Reverse>,
-                                 Value,
-                                 movable_duplex_signal>
-{
-    duplex_apply_signal(
-        duplex_apply_data<Value>& data, Input input, Reverse reverse)
-        : data_(&data), input_(std::move(input)), reverse_(std::move(reverse))
-    {
-    }
-    id_interface const&
-    value_id() const
-    {
-        id_ = make_id(data_->result.version);
-        return id_;
-    }
-    bool
-    has_value() const
-    {
-        return data_->result.status == apply_status::READY
-               || data_->result.status == apply_status::MOVED;
-    }
-    Value const&
-    read() const
-    {
-        return data_->result.value;
-    }
-    Value
-    move_out() const
-    {
-        auto moved_out = std::move(data_->result.value);
-        data_->result.status = apply_status::MOVED;
-        return moved_out;
-    }
-    Value&
-    destructive_ref() const
-    {
-        data_->result.status = apply_status::MOVED;
-        return data_->result.value;
-    }
-    bool
-    ready_to_write() const
-    {
-        return input_.ready_to_write();
-    }
-    void
-    write(Value value) const
-    {
-        input_.write(reverse_(value));
-        // This is sort of hackish, but the idea here is that if we do nothing
-        // right now, on the next refresh, we're going to detect that the input
-        // signal has changed, and then apply the forward mapping to convert
-        // that value back to the one we're writing right now, which is
-        // obviously wasted effort.
-        // To attempt to avoid this, we capture the value ID of the input after
-        // writing to it in the hopes that it has already changed. (That is the
-        // case for some signal types, but not all.)
-        // To do this properly, we should probably allow signal write()
-        // functions to return a new value ID.
-        data_->input_id.capture(input_.value_id());
-        ++data_->result.version;
-        data_->result.value = std::move(value);
-        data_->result.status = apply_status::READY;
-    }
-
- private:
-    duplex_apply_data<Value>* data_;
-    mutable simple_id<counter_type> id_;
-    Input input_;
-    Reverse reverse_;
-};
-template<class Value, class Input, class Reverse>
-auto
-make_duplex_apply_signal(
-    duplex_apply_data<Value>& data, Input input, Reverse reverse)
-{
-    return duplex_apply_signal<Value, Input, Reverse>(
-        data, std::move(input), std::move(reverse));
-}
-
-} // namespace detail
-
-template<class Forward, class Reverse, class Arg>
-auto
-duplex_apply(context ctx, Forward&& forward, Reverse reverse, Arg arg)
-{
-    detail::duplex_apply_data<decltype(forward(forward_signal(arg)))>*
-        data_ptr;
-    get_cached_data(ctx, &data_ptr);
-    auto& data = *data_ptr;
-    bool args_ready = true;
-    process_apply_arg(ctx, data.result, args_ready, data.input_id, arg);
-    process_apply_body(
-        ctx, data.result, args_ready, std::forward<Forward>(forward), arg);
-    return detail::make_duplex_apply_signal(
-        data, std::move(arg), std::move(reverse));
-}
-
-// alia_mem_fn(m) wraps a member function name in a lambda so that it can be
-// passed as a function object. (It's the equivalent of std::mem_fn, but
-// there's no need to provide the type name.)
-#define ALIA_MEM_FN(m)                                                        \
-    [](auto&& x, auto&&... args) {                                            \
-        return x.m(std::forward<decltype(args)>(args)...);                    \
-    }
-#ifndef ALIA_STRICT_MACROS
-#define alia_mem_fn(m) ALIA_MEM_FN(m)
-#endif
-
-} // namespace alia
-
-
-
-namespace alia {
-
-struct signal_validation_data
-{
-    captured_id value_id;
-    std::exception_ptr error;
-};
-
-template<class Wrapped>
-struct validated_signal : signal_wrapper<validated_signal<Wrapped>, Wrapped>
-{
-    validated_signal()
-    {
-    }
-    validated_signal(signal_validation_data* data, Wrapped wrapped)
-        : validated_signal::signal_wrapper(wrapped), data_(data)
-    {
-    }
-    bool
-    has_value() const override
-    {
-        return !data_->error && this->wrapped_.has_value();
-    }
-    bool
-    invalidate(std::exception_ptr error) const override
-    {
-        data_->error = error;
-        this->wrapped_.invalidate(error);
-        return true;
-    }
-    bool
-    is_invalidated() const override
-    {
-        return data_->error || this->wrapped_.is_invalidated();
-    }
-
- private:
-    signal_validation_data* data_;
-};
-
-template<class Signal>
-auto
-enforce_validity(
-    dataless_context ctx, Signal signal, signal_validation_data& data)
-{
-    on_refresh(ctx, [&](auto) {
-        if (!signal.is_invalidated()
-            && !data.value_id.matches(signal.value_id()))
-        {
-            data.error = nullptr;
-            data.value_id.capture(signal.value_id());
-        }
-    });
-    return validated_signal<Signal>(&data, signal);
-}
-
-template<class Signal>
-auto
-enforce_validity(context ctx, Signal signal)
-{
-    auto& data = get_cached_data<signal_validation_data>(ctx);
-    return enforce_validity(ctx, signal, data);
-}
-
-} // namespace alia
-
-
-#include <map>
-#include <utility>
-#include <vector>
-
-
-
-
-// This file defines the operators for signals.
-
-namespace alia {
-
-#define ALIA_DEFINE_BINARY_SIGNAL_OPERATOR(op)                                \
-    template<                                                                 \
-        class A,                                                              \
-        class B,                                                              \
-        std::enable_if_t<                                                     \
-            is_signal_type<A>::value && is_signal_type<B>::value,             \
-            int> = 0>                                                         \
-    auto operator op(A const& a, B const& b)                                  \
-    {                                                                         \
-        return lazy_apply([](auto a, auto b) { return a op b; }, a, b);       \
-    }
-
-ALIA_DEFINE_BINARY_SIGNAL_OPERATOR(+)
-ALIA_DEFINE_BINARY_SIGNAL_OPERATOR(-)
-ALIA_DEFINE_BINARY_SIGNAL_OPERATOR(*)
-ALIA_DEFINE_BINARY_SIGNAL_OPERATOR(/)
-ALIA_DEFINE_BINARY_SIGNAL_OPERATOR(^)
-ALIA_DEFINE_BINARY_SIGNAL_OPERATOR(%)
-ALIA_DEFINE_BINARY_SIGNAL_OPERATOR(&)
-ALIA_DEFINE_BINARY_SIGNAL_OPERATOR(|)
-ALIA_DEFINE_BINARY_SIGNAL_OPERATOR(<<)
-ALIA_DEFINE_BINARY_SIGNAL_OPERATOR(>>)
-ALIA_DEFINE_BINARY_SIGNAL_OPERATOR(==)
-ALIA_DEFINE_BINARY_SIGNAL_OPERATOR(!=)
-ALIA_DEFINE_BINARY_SIGNAL_OPERATOR(<)
-ALIA_DEFINE_BINARY_SIGNAL_OPERATOR(<=)
-ALIA_DEFINE_BINARY_SIGNAL_OPERATOR(>)
-ALIA_DEFINE_BINARY_SIGNAL_OPERATOR(>=)
-
-#undef ALIA_DEFINE_BINARY_SIGNAL_OPERATOR
-
-#define ALIA_DEFINE_LIBERAL_BINARY_SIGNAL_OPERATOR(op)                        \
-    template<                                                                 \
-        class A,                                                              \
-        class B,                                                              \
-        std::enable_if_t<                                                     \
-            is_signal_type<A>::value && !is_signal_type<B>::value,            \
-            int> = 0>                                                         \
-    auto operator op(A const& a, B const& b)                                  \
-    {                                                                         \
-        return lazy_apply(                                                    \
-            [](auto a, auto b) { return a op b; }, a, value(b));              \
-    }                                                                         \
-    template<                                                                 \
-        class A,                                                              \
-        class B,                                                              \
-        std::enable_if_t<                                                     \
-            !is_signal_type<A>::value && !is_action_type<A>::value            \
-                && is_signal_type<B>::value,                                  \
-            int> = 0>                                                         \
-    auto operator op(A const& a, B const& b)                                  \
-    {                                                                         \
-        return lazy_apply(                                                    \
-            [](auto a, auto b) { return a op b; }, value(a), b);              \
-    }
-
-ALIA_DEFINE_LIBERAL_BINARY_SIGNAL_OPERATOR(+)
-ALIA_DEFINE_LIBERAL_BINARY_SIGNAL_OPERATOR(-)
-ALIA_DEFINE_LIBERAL_BINARY_SIGNAL_OPERATOR(*)
-ALIA_DEFINE_LIBERAL_BINARY_SIGNAL_OPERATOR(/)
-ALIA_DEFINE_LIBERAL_BINARY_SIGNAL_OPERATOR(^)
-ALIA_DEFINE_LIBERAL_BINARY_SIGNAL_OPERATOR(%)
-ALIA_DEFINE_LIBERAL_BINARY_SIGNAL_OPERATOR(&)
-ALIA_DEFINE_LIBERAL_BINARY_SIGNAL_OPERATOR(|)
-ALIA_DEFINE_LIBERAL_BINARY_SIGNAL_OPERATOR(<<)
-ALIA_DEFINE_LIBERAL_BINARY_SIGNAL_OPERATOR(>>)
-ALIA_DEFINE_LIBERAL_BINARY_SIGNAL_OPERATOR(==)
-ALIA_DEFINE_LIBERAL_BINARY_SIGNAL_OPERATOR(!=)
-ALIA_DEFINE_LIBERAL_BINARY_SIGNAL_OPERATOR(<)
-ALIA_DEFINE_LIBERAL_BINARY_SIGNAL_OPERATOR(<=)
-ALIA_DEFINE_LIBERAL_BINARY_SIGNAL_OPERATOR(>)
-ALIA_DEFINE_LIBERAL_BINARY_SIGNAL_OPERATOR(>=)
-
-#define ALIA_DEFINE_UNARY_SIGNAL_OPERATOR(op)                                 \
-    template<class A, std::enable_if_t<is_signal_type<A>::value, int> = 0>    \
-    auto operator op(A const& a)                                              \
-    {                                                                         \
-        return lazy_apply([](auto a) { return op a; }, a);                    \
-    }
-
-ALIA_DEFINE_UNARY_SIGNAL_OPERATOR(-)
-ALIA_DEFINE_UNARY_SIGNAL_OPERATOR(!)
-ALIA_DEFINE_UNARY_SIGNAL_OPERATOR(*)
-
-#undef ALIA_DEFINE_UNARY_SIGNAL_OPERATOR
-
-// For most compound assignment operators (e.g., +=), a += b, where :a and
-// :b are signals, creates an action that sets :a equal to :a + :b.
-
-#define ALIA_DEFINE_COMPOUND_ASSIGNMENT_OPERATOR(                             \
-    assignment_form, normal_form)                                             \
-    template<                                                                 \
-        class A,                                                              \
-        class B,                                                              \
-        std::enable_if_t<                                                     \
-            is_duplex_signal_type<A>::value                                   \
-                && is_readable_signal_type<B>::value,                         \
-            int> = 0>                                                         \
-    auto operator assignment_form(A const& a, B const& b)                     \
-    {                                                                         \
-        return a <<= (a normal_form b);                                       \
-    }
-
-ALIA_DEFINE_COMPOUND_ASSIGNMENT_OPERATOR(+=, +)
-ALIA_DEFINE_COMPOUND_ASSIGNMENT_OPERATOR(-=, -)
-ALIA_DEFINE_COMPOUND_ASSIGNMENT_OPERATOR(*=, *)
-ALIA_DEFINE_COMPOUND_ASSIGNMENT_OPERATOR(/=, /)
-ALIA_DEFINE_COMPOUND_ASSIGNMENT_OPERATOR(^=, ^)
-ALIA_DEFINE_COMPOUND_ASSIGNMENT_OPERATOR(%=, %)
-ALIA_DEFINE_COMPOUND_ASSIGNMENT_OPERATOR(&=, &)
-ALIA_DEFINE_COMPOUND_ASSIGNMENT_OPERATOR(|=, |)
-
-#undef ALIA_DEFINE_COMPOUND_ASSIGNMENT_OPERATOR
-
-#define ALIA_DEFINE_LIBERAL_COMPOUND_ASSIGNMENT_OPERATOR(                     \
-    assignment_form, normal_form)                                             \
-    template<                                                                 \
-        class A,                                                              \
-        class B,                                                              \
-        std::enable_if_t<                                                     \
-            is_duplex_signal_type<A>::value && !is_signal_type<B>::value,     \
-            int> = 0>                                                         \
-    auto operator assignment_form(A const& a, B const& b)                     \
-    {                                                                         \
-        return a <<= (a normal_form value(b));                                \
-    }
-
-ALIA_DEFINE_LIBERAL_COMPOUND_ASSIGNMENT_OPERATOR(+=, +)
-ALIA_DEFINE_LIBERAL_COMPOUND_ASSIGNMENT_OPERATOR(-=, -)
-ALIA_DEFINE_LIBERAL_COMPOUND_ASSIGNMENT_OPERATOR(*=, *)
-ALIA_DEFINE_LIBERAL_COMPOUND_ASSIGNMENT_OPERATOR(/=, /)
-ALIA_DEFINE_LIBERAL_COMPOUND_ASSIGNMENT_OPERATOR(^=, ^)
-ALIA_DEFINE_LIBERAL_COMPOUND_ASSIGNMENT_OPERATOR(%=, %)
-ALIA_DEFINE_LIBERAL_COMPOUND_ASSIGNMENT_OPERATOR(&=, &)
-ALIA_DEFINE_LIBERAL_COMPOUND_ASSIGNMENT_OPERATOR(|=, |)
-
-// The increment and decrement operators work similarly.
-
-#define ALIA_DEFINE_BY_ONE_OPERATOR(assignment_form, normal_form)             \
-    template<                                                                 \
-        class A,                                                              \
-        std::enable_if_t<is_duplex_signal_type<A>::value, int> = 0>           \
-    auto operator assignment_form(A const& a)                                 \
-    {                                                                         \
-        return a <<= (a normal_form value(typename A::value_type(1)));        \
-    }                                                                         \
-    template<                                                                 \
-        class A,                                                              \
-        std::enable_if_t<is_duplex_signal_type<A>::value, int> = 0>           \
-    auto operator assignment_form(A const& a, int)                            \
-    {                                                                         \
-        return a <<= (a normal_form value(typename A::value_type(1)));        \
-    }
-
-ALIA_DEFINE_BY_ONE_OPERATOR(++, +)
-ALIA_DEFINE_BY_ONE_OPERATOR(--, -)
-
-#undef ALIA_DEFINE_BY_ONE_OPERATOR
-
-// The || and && operators require special implementations because they don't
-// necessarily need to evaluate both of their arguments...
-
-template<class Arg0, class Arg1>
-struct logical_or_signal
-    : signal<logical_or_signal<Arg0, Arg1>, bool, read_only_signal>
-{
-    logical_or_signal(Arg0 const& arg0, Arg1 const& arg1)
-        : arg0_(arg0), arg1_(arg1)
-    {
-    }
-    id_interface const&
-    value_id() const override
-    {
-        id_ = combine_ids(ref(arg0_.value_id()), ref(arg1_.value_id()));
-        return id_;
-    }
-    bool
-    has_value() const override
-    {
-        // Obviously, this has a value if both of its arguments have values.
-        // However, we can also determine a value if only one input has a value
-        // but that value is true.
-        return (arg0_.has_value() && arg1_.has_value())
-               || (arg0_.has_value() && arg0_.read())
-               || (arg1_.has_value() && arg1_.read());
-    }
-    bool const&
-    read() const override
-    {
-        value_ = (arg0_.has_value() && arg0_.read())
-                 || (arg1_.has_value() && arg1_.read());
-        return value_;
-    }
-
- private:
-    Arg0 arg0_;
-    Arg1 arg1_;
-    mutable id_pair<id_ref, id_ref> id_;
-    mutable bool value_;
-};
-template<
-    class A,
-    class B,
-    std::enable_if_t<
-        is_signal_type<A>::value && is_signal_type<B>::value,
-        int> = 0>
-auto
-operator||(A const& a, B const& b)
-{
-    return logical_or_signal<A, B>(a, b);
-}
-
-template<
-    class A,
-    class B,
-    std::enable_if_t<
-        is_signal_type<A>::value && !is_signal_type<B>::value,
-        int> = 0>
-auto
-operator||(A const& a, B const& b)
-{
-    return a || value(b);
-}
-template<
-    class A,
-    class B,
-    std::enable_if_t<
-        !is_signal_type<A>::value && is_signal_type<B>::value,
-        int> = 0>
-auto
-operator||(A const& a, B const& b)
-{
-    return value(a) || b;
-}
-
-template<class Arg0, class Arg1>
-struct logical_and_signal
-    : signal<logical_and_signal<Arg0, Arg1>, bool, read_only_signal>
-{
-    logical_and_signal(Arg0 const& arg0, Arg1 const& arg1)
-        : arg0_(arg0), arg1_(arg1)
-    {
-    }
-    id_interface const&
-    value_id() const override
-    {
-        id_ = combine_ids(ref(arg0_.value_id()), ref(arg1_.value_id()));
-        return id_;
-    }
-    bool
-    has_value() const override
-    {
-        // Obviously, this has a value if both of its arguments have values.
-        // However, we can also determine a value if only one input has a value
-        // but that value is false.
-        return (arg0_.has_value() && arg1_.has_value())
-               || (arg0_.has_value() && !arg0_.read())
-               || (arg1_.has_value() && !arg1_.read());
-    }
-    bool const&
-    read() const override
-    {
-        value_
-            = !((arg0_.has_value() && !arg0_.read())
-                || (arg1_.has_value() && !arg1_.read()));
-        return value_;
-    }
-
- private:
-    Arg0 arg0_;
-    Arg1 arg1_;
-    mutable id_pair<id_ref, id_ref> id_;
-    mutable bool value_;
-};
-template<
-    class A,
-    class B,
-    std::enable_if_t<
-        is_signal_type<A>::value && is_signal_type<B>::value,
-        int> = 0>
-auto
-operator&&(A const& a, B const& b)
-{
-    return logical_and_signal<A, B>(a, b);
-}
-
-template<
-    class A,
-    class B,
-    std::enable_if_t<
-        is_signal_type<A>::value && !is_signal_type<B>::value,
-        int> = 0>
-auto
-operator&&(A const& a, B const& b)
-{
-    return a && value(b);
-}
-template<
-    class A,
-    class B,
-    std::enable_if_t<
-        !is_signal_type<A>::value && is_signal_type<B>::value,
-        int> = 0>
-auto
-operator&&(A const& a, B const& b)
-{
-    return value(a) && b;
-}
-
-// This is the equivalent of the ternary operator (or std::conditional) for
-// signals.
-//
-// conditional(b, t, f), where :b, :t and :f are all signals, yields :t
-// if :b's value is true and :f if :b's value is false.
-//
-// :t and :f must have the same value type, and :b's value type must be
-// testable in a boolean context.
-//
-// Note that this is a normal function call, so, unlike an if statement or the
-// ternary operator, both :t and :f are fully evaluated. However, they are only
-// read if they're selected.
-//
-template<class Condition, class T, class F>
-struct signal_mux : signal<
-                        signal_mux<Condition, T, F>,
-                        typename T::value_type,
-                        typename signal_capabilities_intersection<
-                            typename T::capabilities,
-                            typename F::capabilities>::type>
-{
-    signal_mux(Condition condition, T t, F f)
-        : condition_(condition), t_(t), f_(f)
-    {
-    }
-    bool
-    has_value() const override
-    {
-        return condition_.has_value()
-               && (condition_.read() ? t_.has_value() : f_.has_value());
-    }
-    typename T::value_type const&
-    read() const override
-    {
-        return condition_.read() ? t_.read() : f_.read();
-    }
-    typename T::value_type
-    move_out() const override
-    {
-        return condition_.read() ? t_.move_out() : f_.move_out();
-    }
-    typename T::value_type&
-    destructive_ref() const override
-    {
-        return condition_.read() ? t_.destructive_ref() : f_.destructive_ref();
-    }
-    id_interface const&
-    value_id() const override
-    {
-        if (!condition_.has_value())
-            return null_id;
-        id_ = combine_ids(
-            make_id(condition_.read() ? true : false),
-            condition_.read() ? ref(t_.value_id()) : ref(f_.value_id()));
-        return id_;
-    }
-    bool
-    ready_to_write() const override
-    {
-        return condition_.has_value()
-               && (condition_.read() ? t_.ready_to_write()
-                                     : f_.ready_to_write());
-    }
-    void
-    write(typename T::value_type value) const override
-    {
-        if (condition_.read())
-            t_.write(value);
-        else
-            f_.write(value);
-    }
-    void
-    clear() const override
-    {
-        if (condition_.read())
-            t_.clear();
-        else
-            f_.clear();
-    }
-    bool
-    invalidate(std::exception_ptr error) const override
-    {
-        if (condition_.read())
-            return t_.invalidate(error);
-        else
-            return f_.invalidate(error);
-    }
-    bool
-    is_invalidated() const override
-    {
-        if (condition_.read())
-            return t_.is_invalidated();
-        else
-            return f_.is_invalidated();
-    }
-
- private:
-    Condition condition_;
-    T t_;
-    F f_;
-    mutable id_pair<simple_id<bool>, id_ref> id_;
-};
-template<class Condition, class T, class F>
-signal_mux<Condition, T, F>
-make_signal_mux(Condition condition, T t, F f)
-{
-    return signal_mux<Condition, T, F>(condition, t, f);
-}
-
-template<class Condition, class T, class F>
-auto
-conditional(Condition condition, T t, F f)
-{
-    return make_signal_mux(signalize(condition), signalize(t), signalize(f));
-}
-
-// Given a signal to a structure, signal->*field_ptr returns a signal to the
-// specified field within the structure.
-template<class StructureSignal, class Field>
-struct field_signal : preferred_id_signal<
-                          field_signal<StructureSignal, Field>,
-                          Field,
-                          typename signal_capabilities_intersection<
-                              typename StructureSignal::capabilities,
-                              movable_duplex_signal>::type,
-                          id_pair<id_ref, simple_id<Field*>>>
-{
-    typedef typename StructureSignal::value_type structure_type;
-    typedef Field structure_type::*field_ptr;
-    field_signal(StructureSignal structure, field_ptr field)
-        : structure_(std::move(structure)), field_(std::move(field))
-    {
-    }
-    bool
-    has_value() const override
-    {
-        return structure_.has_value();
-    }
-    Field const&
-    read() const override
-    {
-        structure_type const& structure = structure_.read();
-        return structure.*field_;
-    }
-    Field
-    move_out() const override
-    {
-        structure_type& structure = structure_.destructive_ref();
-        Field field = std::move(structure.*field_);
-        return field;
-    }
-    Field&
-    destructive_ref() const override
-    {
-        structure_type& structure = structure_.destructive_ref();
-        return structure.*field_;
-    }
-    auto
-    complex_value_id() const
-    {
-        return combine_ids(
-            ref(structure_.value_id()),
-            // Apparently pointers-to-members aren't comparable for order,
-            // which means they don't meet the requirements for serving as an
-            // alia ID, so instead we use the address of the field if it were
-            // in a structure that started at address 0.
-            make_id(&(((structure_type*) 0)->*field_)));
-    }
-    bool
-    ready_to_write() const override
-    {
-        return structure_.has_value() && structure_.ready_to_write();
-    }
-    void
-    write(Field x) const override
-    {
-        structure_type s = forward_signal(alia::move(structure_));
-        s.*field_ = std::move(x);
-        structure_.write(std::move(s));
-    }
-
- private:
-    StructureSignal structure_;
-    field_ptr field_;
-};
-template<class StructureSignal, class Field>
-std::enable_if_t<
-    is_signal_type<StructureSignal>::value,
-    field_signal<StructureSignal, Field>>
-operator->*(
-    StructureSignal const& structure,
-    Field StructureSignal::value_type::*field)
-{
-    return field_signal<StructureSignal, Field>(structure, field);
-}
-
-// ALIA_FIELD(x, f) is equivalent to x->*T::f where T is the value type of x.
-#define ALIA_FIELD(x, f) ((x)->*&std::decay<decltype(read_signal(x))>::type::f)
-#ifndef ALIA_STRICT_MACROS
-#define alia_field(x, f) ALIA_FIELD(x, f)
-#endif
-
-// has_value_type<T>::value yields a compile-time boolean indicating whether or
-// not T has a value_type member (which is the case for standard containers).
-template<class T, class = std::void_t<>>
-struct has_value_type : std::false_type
-{
-};
-template<class T>
-struct has_value_type<T, std::void_t<typename T::value_type>> : std::true_type
-{
-};
-
-// has_mapped_type<T>::value yields a compile-time boolean indicating whether
-// or not T has a mapped_type member (which is the case for standard
-// associative containers, or at least the ones that aren't sets).
-template<class T, class = std::void_t<>>
-struct has_mapped_type : std::false_type
-{
-};
-template<class T>
-struct has_mapped_type<T, std::void_t<typename T::mapped_type>>
-    : std::true_type
-{
-};
-
-// subscript_result_type<Container, Index>::type gives the expected type of the
-// value that results from invoking the subscript operator on a Container.
-// (This is necessary to deal with containers that return proxies.)
-//
-// The logic is as follows:
-// 1 - If the container has a mapped_type field, use that.
-// 2 - Otherwise, if the container has a value_type field, use that.
-// 3 - Otherwise, just see what operator[] returns.
-//
-template<class Container, class Index, class = void>
-struct subscript_result_type
-{
-};
-template<class Container, class Index>
-struct subscript_result_type<
-    Container,
-    Index,
-    std::enable_if_t<has_mapped_type<Container>::value>>
-{
-    typedef typename Container::mapped_type type;
-};
-template<class Container, class Index>
-struct subscript_result_type<
-    Container,
-    Index,
-    std::enable_if_t<
-        !has_mapped_type<Container>::value
-        && has_value_type<Container>::value>>
-{
-    typedef typename Container::value_type type;
-};
-template<class Container, class Index>
-struct subscript_result_type<
-    Container,
-    Index,
-    std::enable_if_t<
-        !has_mapped_type<Container>::value
-        && !has_value_type<Container>::value>>
-{
-    typedef std::decay_t<decltype(
-        std::declval<Container>()[std::declval<Index>()])>
-        type;
-};
-
-// subscript_returns_reference<Container,Index>::value yields a
-// compile-time boolean indicating whether or not the subscript operator
-// for a type returns by reference (vs by value).
-template<class Container, class Index>
-struct subscript_returns_reference
-    : std::is_reference<decltype(
-          std::declval<Container>()[std::declval<Index>()])>
-{
-};
-
-// has_at_indexer<Container, Index>::value yields a compile-time boolean
-// indicating whether or not Container has an 'at' member function that takes
-// an Index.
-template<class Container, class Index, class = std::void_t<>>
-struct has_at_indexer : std::false_type
-{
-};
-template<class Container, class Index>
-struct has_at_indexer<
-    Container,
-    Index,
-    std::void_t<decltype(std::declval<Container const&>().at(
-        std::declval<Index>()))>> : std::true_type
-{
-};
-
-template<class Container, class Index>
-auto
-invoke_const_subscript(
-    Container const& container,
-    Index const& index,
-    std::enable_if_t<!has_at_indexer<Container, Index>::value>* = 0)
-    -> decltype(container[index])
-{
-    return container[index];
-}
-
-template<class Container, class Index>
-auto
-invoke_const_subscript(
-    Container const& container,
-    Index const& index,
-    std::enable_if_t<has_at_indexer<Container, Index>::value>* = 0)
-    -> decltype(container.at(index))
-{
-    return container.at(index);
-}
-
-// const_subscript_returns_reference<Container,Index>::value yields a
-// compile-time boolean indicating whether or not invoke_const_subscript
-// returns by reference (vs by value).
-template<class Container, class Index>
-struct const_subscript_returns_reference
-    : std::is_reference<decltype(invoke_const_subscript(
-          std::declval<Container>(), std::declval<Index>()))>
-{
-};
-
-template<class Container, class Index, class = void>
-struct const_subscript_invoker
-{
-};
-
-template<class Container, class Index>
-struct const_subscript_invoker<
-    Container,
-    Index,
-    std::enable_if_t<
-        const_subscript_returns_reference<Container, Index>::value>>
-{
-    auto const&
-    operator()(Container const& container, Index const& index) const
-    {
-        return invoke_const_subscript(container, index);
-    }
-};
-
-template<class Container, class Index>
-struct const_subscript_invoker<
-    Container,
-    Index,
-    std::enable_if_t<
-        !const_subscript_returns_reference<Container, Index>::value>>
-{
-    auto const&
-    operator()(Container const& container, Index const& index) const
-    {
-        storage_ = invoke_const_subscript(container, index);
-        return storage_;
-    }
-
- private:
-    mutable typename subscript_result_type<Container, Index>::type storage_;
-};
-
-template<class ContainerSignal, class IndexSignal, class Value>
-std::enable_if_t<signal_is_writable<ContainerSignal>::value>
-write_subscript(
-    ContainerSignal const& container, IndexSignal const& index, Value value)
-{
-    auto new_container = forward_signal(alia::move(container));
-    new_container[index.read()] = std::move(value);
-    container.write(std::move(new_container));
-}
-
-template<class ContainerSignal, class IndexSignal, class Value>
-std::enable_if_t<!signal_is_writable<ContainerSignal>::value>
-write_subscript(ContainerSignal const&, IndexSignal const&, Value)
-{
-}
-
-template<class ContainerSignal, class IndexSignal>
-struct subscript_signal
-    : preferred_id_signal<
-          subscript_signal<ContainerSignal, IndexSignal>,
-          typename subscript_result_type<
-              typename ContainerSignal::value_type,
-              typename IndexSignal::value_type>::type,
-          typename signal_capabilities_intersection<
-              typename ContainerSignal::capabilities,
-              typename std::conditional<
-                  subscript_returns_reference<
-                      typename ContainerSignal::value_type,
-                      typename IndexSignal::value_type>::value,
-                  movable_duplex_signal,
-                  move_activated_duplex_signal>::type>::type,
-          id_pair<alia::id_ref, alia::id_ref>>
-{
-    subscript_signal()
-    {
-    }
-    subscript_signal(ContainerSignal array, IndexSignal index)
-        : container_(std::move(array)), index_(std::move(index))
-    {
-    }
-    bool
-    has_value() const override
-    {
-        return container_.has_value() && index_.has_value();
-    }
-    typename subscript_signal::value_type const&
-    read() const override
-    {
-        return invoker_(container_.read(), index_.read());
-    }
-    typename subscript_signal::value_type
-    move_out() const override
-    {
-        auto& container = container_.destructive_ref();
-        typename subscript_signal::value_type moved_out
-            = std::move(container[index_.read()]);
-        return moved_out;
-    }
-    typename subscript_signal::value_type&
-    destructive_ref() const override
-    {
-        if constexpr (subscript_returns_reference<
-                          typename ContainerSignal::value_type,
-                          typename IndexSignal::value_type>::value)
-        {
-            auto& container = container_.destructive_ref();
-            return container[index_.read()];
-        }
-        else
-        {
-            // The signal capabilities system should prevent us from ever
-            // getting here.
-            // LCOV_EXCL_START
-            throw nullptr;
-            // LCOV_EXCL_STOP
-        }
-    }
-    auto
-    complex_value_id() const
-    {
-        return combine_ids(ref(container_.value_id()), ref(index_.value_id()));
-    }
-    bool
-    ready_to_write() const override
-    {
-        return container_.has_value() && index_.has_value()
-               && container_.ready_to_write();
-    }
-    void
-    write(typename subscript_signal::value_type x) const override
-    {
-        write_subscript(container_, index_, std::move(x));
-    }
-
- private:
-    ContainerSignal container_;
-    IndexSignal index_;
-    const_subscript_invoker<
-        typename ContainerSignal::value_type,
-        typename IndexSignal::value_type>
-        invoker_;
-};
-template<class ContainerSignal, class IndexSignal>
-subscript_signal<ContainerSignal, IndexSignal>
-make_subscript_signal(ContainerSignal container, IndexSignal index)
-{
-    return subscript_signal<ContainerSignal, IndexSignal>(
-        std::move(container), std::move(index));
-}
-
-template<class Derived, class Value, class Capabilities>
-template<class Index>
-auto
-signal_base<Derived, Value, Capabilities>::operator[](Index index) const
-{
-    return make_subscript_signal(
-        static_cast<Derived const&>(*this), signalize(std::move(index)));
-}
-
-} // namespace alia
-
-
-namespace alia {
-
-// is_map_like<Container>::value yields a compile-time boolean indicating
-// whether or not Container behaves like a map for the purposes of alia
-// iteration and indexing. (This is determined by checking whether or not
-// Container has both a key_type and a mapped_type member.)
-template<class T, class = std::void_t<>>
-struct is_map_like : std::false_type
-{
-};
-template<class T>
-struct is_map_like<
-    T,
-    std::void_t<typename T::key_type, typename T::mapped_type>>
-    : std::true_type
-{
-};
-
-// is_vector_like<Container>::value yields a compile-time boolean indicating
-// whether or not Container behaves like a vector for the purposes of alia
-// iteration and indexing. (This is determined by checking whether or not
-// Container can be subscripted with a size_t. This is sufficient because the
-// main purpose is to distinguish vector-like containers from list-like ones.)
-template<class Container, class = std::void_t<>>
-struct is_vector_like : std::false_type
-{
-};
-template<class Container>
-struct is_vector_like<
-    Container,
-    std::void_t<
-        typename Container::value_type,
-        typename Container::size_type,
-        decltype(std::declval<Container>().at(size_t(0)))>> : std::true_type
-{
-};
-
-template<class Item>
-auto
-get_alia_item_id(Item const&)
-{
-    return null_id;
-}
-
-// invoke_map_iteration_body selects the appropriate way to invoke the
-// iteration body function provided to for_each (for map-like containers).
-template<
-    class IterationBody,
-    class NamedBlockBegin,
-    class Key,
-    class Value,
-    std::enable_if_t<
-        std::is_invocable<IterationBody&&, naming_context&, Key&&, Value&&>::
-            value,
-        int> = 0>
-void
-invoke_map_iteration_body(
-    IterationBody&& body,
-    naming_context& nc,
-    NamedBlockBegin&&,
-    Key&& key,
-    Value&& value)
-{
-    body(nc, key, value);
-}
-template<
-    class IterationBody,
-    class NamedBlockBegin,
-    class Key,
-    class Value,
-    std::enable_if_t<
-        std::is_invocable<IterationBody&&, Key&&, Value&&>::value,
-        int> = 0>
-void
-invoke_map_iteration_body(
-    IterationBody&& body,
-    naming_context&,
-    NamedBlockBegin&& nb_begin,
-    Key&& key,
-    Value&& value)
-{
-    named_block nb;
-    nb_begin(nb);
-    body(key, value);
-}
-
-// for_each for map-like containers
-template<
-    class Context,
-    class ContainerSignal,
-    class Fn,
-    std::enable_if_t<
-        is_signal_type<ContainerSignal>::value
-            && is_map_like<typename ContainerSignal::value_type>::value,
-        int> = 0>
-void
-for_each(Context ctx, ContainerSignal const& container_signal, Fn&& fn)
-{
-    ALIA_IF(has_value(container_signal))
-    {
-        naming_context nc(ctx);
-        auto const& container = read_signal(container_signal);
-        for (auto const& item : container)
-        {
-            auto key = direct(item.first);
-            auto value = container_signal[key];
-            invoke_map_iteration_body(
-                fn,
-                nc,
-                [&](named_block& nb) { nb.begin(nc, make_id(item.first)); },
-                key,
-                value);
-        }
-    }
-    ALIA_END
-}
-
-// invoke_sequence_iteration_body selects the appropriate way to invoke the
-// iteration body function provided to for_each (for sequence containers).
-template<
-    class IterationBody,
-    class NamedBlockBegin,
-    class Item,
-    std::enable_if_t<
-        std::is_invocable<IterationBody&&, naming_context&, size_t, Item&&>::
-            value,
-        int> = 0>
-void
-invoke_sequence_iteration_body(
-    IterationBody&& body,
-    naming_context& nc,
-    NamedBlockBegin&&,
-    size_t index,
-    Item&& item)
-{
-    body(nc, index, item);
-}
-template<
-    class IterationBody,
-    class NamedBlockBegin,
-    class Item,
-    std::enable_if_t<
-        std::is_invocable<IterationBody&&, size_t, Item&&>::value,
-        int> = 0>
-void
-invoke_sequence_iteration_body(
-    IterationBody&& body,
-    naming_context&,
-    NamedBlockBegin&& nb_begin,
-    size_t index,
-    Item&& item)
-{
-    named_block nb;
-    nb_begin(nb);
-    body(index, item);
-}
-template<
-    class IterationBody,
-    class NamedBlockBegin,
-    class Item,
-    std::enable_if_t<
-        std::is_invocable<IterationBody&&, naming_context&, Item&&>::value,
-        int> = 0>
-void
-invoke_sequence_iteration_body(
-    IterationBody&& body,
-    naming_context& nc,
-    NamedBlockBegin&&,
-    size_t,
-    Item&& item)
-{
-    body(nc, item);
-}
-template<
-    class IterationBody,
-    class NamedBlockBegin,
-    class Item,
-    std::enable_if_t<
-        std::is_invocable<IterationBody&&, Item&&>::value,
-        int> = 0>
-void
-invoke_sequence_iteration_body(
-    IterationBody&& body,
-    naming_context&,
-    NamedBlockBegin&& nb_begin,
-    size_t,
-    Item&& item)
-{
-    named_block nb;
-    nb_begin(nb);
-    body(item);
-}
-
-// for_each for signals carrying vector-like containers
-template<
-    class Context,
-    class ContainerSignal,
-    class Fn,
-    std::enable_if_t<
-        is_signal_type<ContainerSignal>::value
-            && !is_map_like<typename ContainerSignal::value_type>::value
-            && is_vector_like<typename ContainerSignal::value_type>::value,
-        int> = 0>
-void
-for_each(Context ctx, ContainerSignal const& container_signal, Fn&& fn)
-{
-    ALIA_IF(has_value(container_signal))
-    {
-        naming_context nc(ctx);
-        auto const& container = read_signal(container_signal);
-        size_t const item_count = container.size();
-        for (size_t index = 0; index != item_count; ++index)
-        {
-            invoke_sequence_iteration_body(
-                fn,
-                nc,
-                [&](named_block& nb) {
-                    auto iteration_id = get_alia_item_id(container[index]);
-                    if (iteration_id != null_id)
-                        nb.begin(nc, iteration_id);
-                    else
-                        nb.begin(nc, make_id(index));
-                },
-                index,
-                container_signal[value(index)]);
-        }
-    }
-    ALIA_END
-}
-
-// for_each for vector-like containers of signals
-template<
-    class Context,
-    class Container,
-    class Fn,
-    std::enable_if_t<
-        !is_signal_type<
-            std::remove_cv_t<std::remove_reference_t<Container>>>::value
-            && !is_map_like<
-                std::remove_cv_t<std::remove_reference_t<Container>>>::value
-            && is_vector_like<
-                std::remove_cv_t<std::remove_reference_t<Container>>>::value
-            && is_signal_type<typename std::remove_cv_t<
-                std::remove_reference_t<Container>>::value_type>::value,
-        int> = 0>
-void
-for_each(Context ctx, Container&& container, Fn&& fn)
-{
-    naming_context nc(ctx);
-    size_t index = 0;
-    for (auto&& item : container)
-    {
-        invoke_sequence_iteration_body(
-            fn,
-            nc,
-            [&](named_block& nb) {
-                // We don't try to use get_alia_item_id() here because we want
-                // to support the use case where the UI is present even when
-                // the item isn't available, and we want to keep the block ID
-                // stable in that scenario.
-                nb.begin(nc, make_id(index));
-            },
-            index,
-            item);
-        ++index;
-    }
-}
-
-// for_each for vector-like containers of raw values
-template<
-    class Context,
-    class Container,
-    class Fn,
-    std::enable_if_t<
-        !is_signal_type<
-            std::remove_cv_t<std::remove_reference_t<Container>>>::value
-            && !is_map_like<
-                std::remove_cv_t<std::remove_reference_t<Container>>>::value
-            && is_vector_like<
-                std::remove_cv_t<std::remove_reference_t<Container>>>::value
-            && !is_signal_type<typename std::remove_cv_t<
-                std::remove_reference_t<Container>>::value_type>::value,
-        int> = 0>
-void
-for_each(Context ctx, Container&& container, Fn&& fn)
-{
-    naming_context nc(ctx);
-    size_t index = 0;
-    for (auto&& item : container)
-    {
-        invoke_sequence_iteration_body(
-            fn,
-            nc,
-            [&](named_block& nb) {
-                auto iteration_id = get_alia_item_id(item);
-                if (iteration_id != null_id)
-                    nb.begin(nc, iteration_id);
-                else
-                    nb.begin(nc, make_id(index));
-            },
-            index,
-            item);
-        ++index;
-    }
-}
-
-// signal type for accessing items within a list
-template<class ListSignal, class Item>
-struct list_item_signal : signal<
-                              list_item_signal<ListSignal, Item>,
-                              Item,
-                              typename ListSignal::capabilities>
-{
-    list_item_signal(ListSignal const& list_signal, size_t index, Item* item)
-        : list_signal_(list_signal), index_(index), item_(item)
-    {
-    }
-    id_interface const&
-    value_id() const
-    {
-        id_ = combine_ids(ref(list_signal_.value_id()), make_id(index_));
-        return id_;
-    }
-    bool
-    has_value() const
-    {
-        return list_signal_.has_value();
-    }
-    Item const&
-    read() const
-    {
-        return *item_;
-    }
-    Item
-    move_out() const
-    {
-        return *item_;
-    }
-    Item&
-    destructive_ref() const
-    {
-        return *item_;
-    }
-    bool
-    ready_to_write() const
-    {
-        return list_signal_.ready_to_write();
-    }
-    void
-    write(Item value) const
-    {
-        *item_ = std::move(value);
-    }
-
- private:
-    ListSignal list_signal_;
-    size_t index_;
-    Item* item_;
-    mutable id_pair<id_ref, simple_id<size_t>> id_;
-};
-template<class ListSignal, class Item>
-list_item_signal<ListSignal, Item>
-make_list_item_signal(ListSignal const& signal, size_t index, Item const* item)
-{
-    return list_item_signal<ListSignal, Item>(
-        signal, index, const_cast<Item*>(item));
-}
-
-// for_each for list-like signal containers
-template<
-    class Context,
-    class ContainerSignal,
-    class Fn,
-    std::enable_if_t<
-        is_signal_type<ContainerSignal>::value
-            && !is_map_like<typename ContainerSignal::value_type>::value
-            && !is_vector_like<typename ContainerSignal::value_type>::value,
-        int> = 0>
-void
-for_each(Context ctx, ContainerSignal const& container_signal, Fn&& fn)
-{
-    ALIA_IF(has_value(container_signal))
-    {
-        naming_context nc(ctx);
-        auto const& container = read_signal(container_signal);
-        size_t index = 0;
-        for (auto const& item : container)
-        {
-            invoke_sequence_iteration_body(
-                fn,
-                nc,
-                [&](named_block& nb) {
-                    auto iteration_id = get_alia_item_id(item);
-                    if (iteration_id != null_id)
-                        nb.begin(nc, iteration_id);
-                    else
-                        nb.begin(nc, make_id(&item));
-                },
-                index,
-                make_list_item_signal(container_signal, index, &item));
-            ++index;
-        }
-    }
-    ALIA_END
-}
-
-// for_each for list-like containers of signals
-template<
-    class Context,
-    class Container,
-    class Fn,
-    std::enable_if_t<
-        !is_signal_type<
-            std::remove_cv_t<std::remove_reference_t<Container>>>::value
-            && !is_map_like<
-                std::remove_cv_t<std::remove_reference_t<Container>>>::value
-            && !is_vector_like<
-                std::remove_cv_t<std::remove_reference_t<Container>>>::value
-            && is_signal_type<typename std::remove_cv_t<
-                std::remove_reference_t<Container>>::value_type>::value,
-        int> = 0>
-void
-for_each(Context ctx, Container&& container, Fn&& fn)
-{
-    naming_context nc(ctx);
-    size_t index = 0;
-    for (auto&& item : container)
-    {
-        invoke_sequence_iteration_body(
-            fn,
-            nc,
-            [&](named_block& nb) {
-                // We don't try to use get_alia_item_id() here because we want
-                // to support the use case where the UI is present even when
-                // the item isn't available, and we want to keep the block ID
-                // stable in that scenario.
-                nb.begin(nc, make_id(&item));
-            },
-            index,
-            item);
-        ++index;
-    }
-}
-
-// for_each for list-like containers of raw values
-template<
-    class Context,
-    class Container,
-    class Fn,
-    std::enable_if_t<
-        !is_signal_type<
-            std::remove_cv_t<std::remove_reference_t<Container>>>::value
-            && !is_map_like<
-                std::remove_cv_t<std::remove_reference_t<Container>>>::value
-            && !is_vector_like<
-                std::remove_cv_t<std::remove_reference_t<Container>>>::value
-            && !is_signal_type<typename std::remove_cv_t<
-                std::remove_reference_t<Container>>::value_type>::value,
-        int> = 0>
-void
-for_each(Context ctx, Container&& container, Fn&& fn)
-{
-    naming_context nc(ctx);
-    size_t index = 0;
-    for (auto&& item : container)
-    {
-        invoke_sequence_iteration_body(
-            fn,
-            nc,
-            [&](named_block& nb) {
-                auto iteration_id = get_alia_item_id(item);
-                if (iteration_id != null_id)
-                    nb.begin(nc, iteration_id);
-                else
-                    nb.begin(nc, make_id(&item));
-            },
-            index,
-            item);
-        ++index;
-    }
-}
-
-} // namespace alia
-
-
-namespace alia {
-
-// `transform()` is the component-level version of `std::transform`. See the
-// docs for more details.
-
-// the sequence version...
-
-template<class MappedItem>
-struct mapped_sequence_data
-{
-    captured_id input_id;
-    std::vector<MappedItem> mapped_items;
-    std::vector<captured_id> item_ids;
-    counter_type output_version = 0;
-};
-
-template<class MappedItem>
-struct mapped_sequence_signal : signal<
-                                    mapped_sequence_signal<MappedItem>,
-                                    std::vector<MappedItem>,
-                                    read_only_signal>
-{
-    mapped_sequence_signal(
-        mapped_sequence_data<MappedItem>& data, bool all_items_have_values)
-        : data_(&data), all_items_have_values_(all_items_have_values)
-    {
-    }
-    id_interface const&
-    value_id() const override
-    {
-        id_ = make_id(data_->output_version);
-        return id_;
-    }
-    bool
-    has_value() const override
-    {
-        return all_items_have_values_;
-    }
-    std::vector<MappedItem> const&
-    read() const override
-    {
-        return data_->mapped_items;
-    }
-
- private:
-    mapped_sequence_data<MappedItem>* data_;
-    bool all_items_have_values_;
-    mutable simple_id<counter_type> id_;
-};
-
-template<
-    class Context,
-    class Container,
-    class Function,
-    std::enable_if_t<
-        !is_map_like<typename Container::value_type>::value,
-        int> = 0>
-auto
-transform(Context ctx, Container const& container, Function&& f)
-{
-    typedef typename decltype(
-        f(std::declval<readable<
-              typename Container::value_type::value_type>>()))::value_type
-        mapped_value_type;
-
-    mapped_sequence_data<mapped_value_type>* data;
-    get_cached_data(ctx, &data);
-
-    bool all_items_have_values = false;
-
-    ALIA_IF(has_value(container))
-    {
-        size_t container_size = read_signal(container).size();
-
-        if (!data->input_id.matches(container.value_id()))
-        {
-            data->mapped_items.resize(container_size);
-            data->item_ids.resize(container_size);
-            ++data->output_version;
-            data->input_id.capture(container.value_id());
-        }
-
-        size_t valid_item_count = 0;
-        auto captured_item = data->mapped_items.begin();
-        auto captured_id = data->item_ids.begin();
-        for_each(ctx, container, [&](auto item) {
-            auto mapped_item = f(item);
-            if (signal_has_value(mapped_item))
-            {
-                if (!captured_id->matches(mapped_item.value_id()))
-                {
-                    *captured_item = read_signal(mapped_item);
-                    captured_id->capture(mapped_item.value_id());
-                    ++data->output_version;
-                }
-                ++valid_item_count;
-            }
-            ++captured_item;
-            ++captured_id;
-        });
-        assert(captured_item == data->mapped_items.end());
-        assert(captured_id == data->item_ids.end());
-
-        all_items_have_values = (valid_item_count == container_size);
-    }
-    ALIA_END
-
-    return mapped_sequence_signal<mapped_value_type>(
-        *data, all_items_have_values);
-}
-
-// the map version...
-
-template<class Key, class MappedItem>
-struct mapped_map_data
-{
-    captured_id input_id;
-    std::map<Key, MappedItem> mapped_items;
-    std::vector<captured_id> item_ids;
-    counter_type output_version = 0;
-};
-
-template<class Key, class MappedItem>
-struct mapped_map_signal : signal<
-                               mapped_map_signal<Key, MappedItem>,
-                               std::map<Key, MappedItem>,
-                               read_only_signal>
-{
-    mapped_map_signal(
-        mapped_map_data<Key, MappedItem>& data, bool all_items_have_values)
-        : data_(&data), all_items_have_values_(all_items_have_values)
-    {
-    }
-    id_interface const&
-    value_id() const override
-    {
-        id_ = make_id(data_->output_version);
-        return id_;
-    }
-    bool
-    has_value() const override
-    {
-        return all_items_have_values_;
-    }
-    std::map<Key, MappedItem> const&
-    read() const override
-    {
-        return data_->mapped_items;
-    }
-
- private:
-    mapped_map_data<Key, MappedItem>* data_;
-    bool all_items_have_values_;
-    mutable simple_id<counter_type> id_;
-};
-
-template<
-    class Context,
-    class Container,
-    class Function,
-    std::enable_if_t<
-        is_map_like<typename Container::value_type>::value,
-        int> = 0>
-auto
-transform(Context ctx, Container const& container, Function&& f)
-{
-    typedef typename Container::value_type::key_type key_type;
-    typedef typename decltype(
-        f(std::declval<readable<key_type>>(),
-          std::declval<readable<
-              typename Container::value_type::mapped_type>>()))::value_type
-        mapped_value_type;
-
-    mapped_map_data<key_type, mapped_value_type>* data;
-    get_cached_data(ctx, &data);
-
-    bool all_items_have_values = false;
-
-    ALIA_IF(has_value(container))
-    {
-        size_t container_size = read_signal(container).size();
-
-        if (!data->input_id.matches(container.value_id()))
-        {
-            // There's probably a less heavy-handed approach to this, but
-            // this works for now.
-            data->mapped_items.clear();
-            data->item_ids.clear();
-            data->item_ids.resize(container_size);
-            ++data->output_version;
-            data->input_id.capture(container.value_id());
-        }
-
-        size_t valid_item_count = 0;
-        auto captured_id = data->item_ids.begin();
-        for_each(ctx, container, [&](auto key, auto value) {
-            auto mapped_item = f(key, value);
-            if (signal_has_value(mapped_item))
-            {
-                if (!captured_id->matches(mapped_item.value_id()))
-                {
-                    data->mapped_items[read_signal(key)]
-                        = read_signal(mapped_item);
-                    captured_id->capture(mapped_item.value_id());
-                    ++data->output_version;
-                }
-                ++valid_item_count;
-            }
-            ++captured_id;
-        });
-        assert(captured_id == data->item_ids.end());
-
-        all_items_have_values = (valid_item_count == container_size);
-    }
-    ALIA_END
-
-    return mapped_map_signal<key_type, mapped_value_type>(
-        *data, all_items_have_values);
-}
-
-} // namespace alia
-
-
-
-namespace alia {
-
-// size(s), where :s is a signal, yields a signal carrying the size of :s
-// (as determined by calling s.size()).
-template<class ContainerSignal>
-auto
-size(ContainerSignal cs)
-{
-    return lazy_apply(ALIA_MEM_FN(size), std::move(cs));
-}
-
-// is_empty(s), where :s is a signal, yields a signal indicating whether or not
-// :s carries an empty value. (This is determined by calling the `empty()`
-// member function of the value, so it works on most containers (including
-// strings).)
-template<class ContainerSignal>
-auto
-is_empty(ContainerSignal cs)
-{
-    return lazy_apply([](auto const& x) { return x.empty(); }, cs);
-}
-
-// hide_if_empty(s), where :s is a signal, yields a wrapper for :s that will
-// claim to have no value if that value would be empty.
-template<class ContainerSignal>
-auto
-hide_if_empty(ContainerSignal cs)
-{
-    return mask_reads(cs, !is_empty(cs));
-}
-
-} // namespace alia
-
-
-
-#include <cstdio>
-
-namespace alia {
-
-// The following implements a very minimal C++-friendly version of printf that
-// works with signals.
-
-template<class Value>
-Value
-make_printf_friendly(Value x)
-{
-    return x;
-}
-
-inline char const*
-make_printf_friendly(std::string const& x)
-{
-    return x.c_str();
-}
-
-struct printf_format_error : exception
-{
-    printf_format_error() : exception("printf format error")
-    {
-    }
-};
-
-template<class... Args>
-std::string
-invoke_snprintf(std::string const& format, Args const&... args)
-{
-    int length
-        = std::snprintf(0, 0, format.c_str(), make_printf_friendly(args)...);
-    if (length < 0)
-        throw printf_format_error();
-    std::string s;
-    if (length > 0)
-    {
-        s.resize(length);
-        std::snprintf(
-            &s[0], length + 1, format.c_str(), make_printf_friendly(args)...);
-    }
-    return s;
-}
-
-template<class Format, class... Args>
-auto
-printf(context ctx, Format format, Args... args)
-{
-    return apply(
-        ctx,
-        ALIA_LAMBDIFY(invoke_snprintf),
-        signalize(format),
-        signalize(args)...);
-}
-
-// All conversion of values to and from text goes through the functions
-// from_string and to_string. In order to use a particular value type with
-// the text-based widgets and utilities provided here, that type must
-// implement these functions.
-
-#define ALIA_DECLARE_STRING_CONVERSIONS(T)                                    \
-    void from_string(T* value, std::string const& s);                         \
-    std::string to_string(T value);
-
-// from_string(value, s) should parse the string s and store it in *value.
-// It should throw a validation_error if the string doesn't parse.
-
-// to_string(value) should simply return the string form of value.
-
-// Implementations of from_string and to_string are provided for the following
-// types.
-
-ALIA_DECLARE_STRING_CONVERSIONS(short int)
-ALIA_DECLARE_STRING_CONVERSIONS(unsigned short int)
-ALIA_DECLARE_STRING_CONVERSIONS(int)
-ALIA_DECLARE_STRING_CONVERSIONS(unsigned int)
-ALIA_DECLARE_STRING_CONVERSIONS(long int)
-ALIA_DECLARE_STRING_CONVERSIONS(unsigned long int)
-ALIA_DECLARE_STRING_CONVERSIONS(long long int)
-ALIA_DECLARE_STRING_CONVERSIONS(unsigned long long int)
-ALIA_DECLARE_STRING_CONVERSIONS(float)
-ALIA_DECLARE_STRING_CONVERSIONS(double)
-ALIA_DECLARE_STRING_CONVERSIONS(std::string)
-
-// as_text(ctx, x) creates a text-based interface to the signal x.
-template<class Readable>
-auto
-as_text(context ctx, Readable x)
-{
-    return apply(ctx, ALIA_LAMBDIFY(to_string), x);
-}
-
-// as_duplex_text(ctx, x) is similar to as_text but it's duplex.
-template<class Value>
-struct duplex_text_data
-{
-    captured_id input_id;
-    Value input_value;
-    bool output_valid = false;
-    std::string output_text;
-    counter_type output_version = 1;
-};
-template<class Value, class Readable>
-void
-update_duplex_text(duplex_text_data<Value>* data, Readable x)
-{
-    if (signal_has_value(x))
-    {
-        auto const& input_id = x.value_id();
-        if (!data->input_id.matches(input_id))
-        {
-            if (!data->output_valid || read_signal(x) != data->input_value)
-            {
-                data->input_value = read_signal(x);
-                data->output_text = to_string(read_signal(x));
-                data->output_valid = true;
-                ++data->output_version;
-            }
-            data->input_id.capture(input_id);
-        }
-    }
-    else
-    {
-        data->output_valid = false;
-    }
-}
-template<class Wrapped>
-struct duplex_text_signal : casting_signal_wrapper<
-                                duplex_text_signal<Wrapped>,
-                                Wrapped,
-                                std::string,
-                                typename signal_capabilities_intersection<
-                                    movable_duplex_signal,
-                                    typename Wrapped::capabilities>::type>
-{
-    duplex_text_signal(
-        Wrapped wrapped, duplex_text_data<typename Wrapped::value_type>* data)
-        : duplex_text_signal::casting_signal_wrapper(wrapped), data_(data)
-    {
-    }
-    bool
-    has_value() const override
-    {
-        return data_->output_valid;
-    }
-    std::string const&
-    read() const override
-    {
-        return data_->output_text;
-    }
-    std::string
-    move_out() const override
-    {
-        std::string moved_out = std::move(data_->output_text);
-        data_->input_id.clear();
-        data_->output_valid = false;
-        return moved_out;
-    }
-    std::string&
-    destructive_ref() const override
-    {
-        data_->input_id.clear();
-        data_->output_valid = false;
-        return data_->output_text;
-    }
-    id_interface const&
-    value_id() const override
-    {
-        id_ = make_id(data_->output_version);
-        return id_;
-    }
-    void
-    write(std::string s) const override
-    {
-        typename Wrapped::value_type value;
-        from_string(&value, s);
-        data_->input_value = value;
-        this->wrapped_.write(std::move(value));
-        data_->output_text = s;
-        ++data_->output_version;
-    }
-
- private:
-    duplex_text_data<typename Wrapped::value_type>* data_;
-    mutable simple_id<counter_type> id_;
-};
-template<class Signal>
-duplex_text_signal<Signal>
-as_duplex_text(context ctx, Signal x)
-{
-    duplex_text_data<typename Signal::value_type>* data;
-    get_cached_data(ctx, &data);
-    update_duplex_text(data, x);
-    return duplex_text_signal<Signal>(x, data);
-}
-
-} // namespace alia
-
-
-
-namespace alia {
-
-// state_storage<Value> is designed to be stored persistently within the
-// component tree to represent application state or other data that needs to be
-// tracked similarly. It contains a 'version' number that counts changes and
-// serves as a signal value ID, and it also takes care of mark the component
-// tree as 'dirty' when it's updated.
-template<class Value>
-struct state_storage
-{
-    state_storage() : version_(0)
-    {
-    }
-
-    explicit state_storage(Value value) : value_(std::move(value)), version_(1)
-    {
-    }
-
-    bool
-    is_initialized() const
-    {
-        return version_ != 0;
-    }
-
-    bool
-    has_value() const
-    {
-        return (version_ & 1) != 0;
-    }
-
-    Value const&
-    get() const
-    {
-        return value_;
-    }
-
-    unsigned
-    version() const
-    {
-        return version_;
-    }
-
-    void
-    set(Value value)
-    {
-        value_ = std::move(value);
-        set_valid_flag();
-        handle_tracked_change();
-    }
-
-    void
-    clear()
-    {
-        clear_valid_flag();
-        handle_tracked_change();
-    }
-
-    // If you REALLY need direct, non-const access to the underlying state,
-    // you can use this. It returns a non-const reference to the value and
-    // increments the version number (assuming you'll make some changes).
-    //
-    // Note that you should be careful to use this atomically. In other words,
-    // call this to get a reference, do your update, and then discard the
-    // reference before anyone else observes the state. If you hold onto the
-    // reference and continue making changes while other alia code is accessing
-    // it, they'll end up with outdated views of the state.
-    //
-    // Also note that if you call this on an uninitialized state, you're
-    // expected to initialize it.
-    //
-    Value&
-    nonconst_ref()
-    {
-        set_valid_flag();
-        handle_tracked_change();
-        return value_;
-    }
-
-    // This is even less safe. It's like above, but any changes you make will
-    // NOT be marked in the component tree, so you should only use this if you
-    // know it's safe to do so.
-    Value&
-    untracked_nonconst_ref()
-    {
-        set_valid_flag();
-        inc_version();
-        return value_;
-    }
-
-    // Similarly unsafe way to clear the value.
-    void
-    untracked_clear()
-    {
-        clear_valid_flag();
-        inc_version();
-    }
-
-    // Update the container that the state is part of.
-    void
-    refresh_container(component_container_ptr const& container)
-    {
-        container_ = container;
-    }
-
- private:
-    void
-    set_valid_flag()
-    {
-        version_ |= 1;
-    }
-
-    void
-    clear_valid_flag()
-    {
-        version_ &= ~1;
-    }
-
-    void
-    inc_version()
-    {
-        version_ += 2;
-    }
-
-    void
-    handle_tracked_change()
-    {
-        inc_version();
-        mark_dirty_component(container_);
-    }
-
-    Value value_;
-    // version_ is incremented for each change in the value (or validity) of
-    // the state. The lowest bit of this indicates if the value is valid.
-    unsigned version_;
-    component_container_ptr container_;
-};
-
-template<class Value>
-struct state_signal
-    : signal<
-          state_signal<Value>,
-          Value,
-          signal_capabilities<signal_movable, signal_clearable>>
-{
-    explicit state_signal(state_storage<Value>* data) : data_(data)
-    {
-    }
-
-    simple_id<unsigned> const&
-    value_id() const override
-    {
-        id_ = make_id(data_->version());
-        return id_;
-    }
-    bool
-    has_value() const override
-    {
-        return data_->has_value();
-    }
-    Value const&
-    read() const override
-    {
-        return data_->get();
-    }
-    Value
-    move_out() const override
-    {
-        Value moved = std::move(data_->untracked_nonconst_ref());
-        return moved;
-    }
-    Value&
-    destructive_ref() const override
-    {
-        return data_->untracked_nonconst_ref();
-    }
-
-    bool
-    ready_to_write() const override
-    {
-        return true;
-    }
-    void
-    write(Value value) const override
-    {
-        data_->set(std::move(value));
-    }
-    void
-    clear() const override
-    {
-        data_->clear();
-    }
-
- private:
-    state_storage<Value>* data_;
-    mutable simple_id<unsigned> id_;
-};
-
-template<class Value>
-state_signal<Value>
-make_state_signal(state_storage<Value>& data)
-{
-    return state_signal<Value>(&data);
-}
-
-namespace detail {
-
-template<class Context, class Value, class InitialValueSignal>
-void
-common_state_signal_logic(
-    Context ctx,
-    state_storage<Value>* state,
-    InitialValueSignal const& initial_value_signal)
-{
-    on_refresh(ctx, [&](auto ctx) {
-        state->refresh_container(get_active_component_container(ctx));
-        if (!state->is_initialized() && signal_has_value(initial_value_signal))
-        {
-            state->untracked_nonconst_ref()
-                = forward_signal(initial_value_signal);
-        }
-    });
-}
-
-} // namespace detail
-
-// get_state(ctx, initial_value) returns a signal carrying some persistent
-// local state whose initial value is determined by the :initial_value signal.
-// The returned signal will not have a value until :initial_value has one or
-// one is explicitly written to the state signal.
-template<class Context, class InitialValue>
-auto
-get_state(Context ctx, InitialValue initial_value)
-{
-    auto initial_value_signal = signalize(std::move(initial_value));
-
-    state_storage<typename decltype(initial_value_signal)::value_type>* state;
-    get_data(ctx, &state);
-
-    detail::common_state_signal_logic(ctx, state, initial_value_signal);
-
-    return make_state_signal(*state);
-}
-
-// get_transient_state(ctx, initial_value) returns a signal carrying some
-// transient local state whose initial value is determined by the
-// :initial_value signal. The returned signal will not have a value until
-// :initial_value has one or one is explicitly written to the state signal.
-//
-// Unlike get_state, this returns state that does *not* persist when the
-// component is inactive. Rather, it is reinitialized whenever the component is
-// activated.
-//
-template<class Context, class InitialValue>
-auto
-get_transient_state(Context ctx, InitialValue initial_value)
-{
-    auto initial_value_signal = signalize(std::move(initial_value));
-
-    state_storage<typename decltype(initial_value_signal)::value_type>* state;
-    get_cached_data(ctx, &state);
-
-    detail::common_state_signal_logic(ctx, state, initial_value_signal);
-
-    return make_state_signal(*state);
-}
-
-} // namespace alia
-
-
-
-// This file defines utilities for constructing custom signals via lambda
-// functions.
-
-namespace alia {
-
-// lambda_constant(read) creates a read-only signal whose value is constant and
-// is determined by calling :read.
-template<class Value, class Read>
-struct lambda_constant_signal
-    : signal<lambda_constant_signal<Value, Read>, Value, move_activated_signal>
-{
-    lambda_constant_signal(Read read) : read_(read)
-    {
-    }
-    bool
-    has_value() const override
-    {
-        return true;
-    }
-    id_interface const&
-    value_id() const override
-    {
-        return unit_id;
-    }
-    Value const&
-    read() const override
-    {
-        value_ = read_();
-        return value_;
-    }
-    Value
-    move_out() const override
-    {
-        return read_();
-    }
-    Value&
-    destructive_ref() const override
-    {
-        value_ = read_();
-        return value_;
-    }
-
- private:
-    Read read_;
-    mutable decltype(read_()) value_;
-};
-template<class Read>
-auto
-lambda_constant(Read read)
-{
-    return lambda_constant_signal<std::decay_t<decltype(read())>, Read>(read);
-}
-
-// lambda_reader(read) creates a read-only signal whose value is determined by
-// calling :read.
-template<class Value, class Read>
-struct simple_lambda_reader_signal
-    : regular_signal<
-          simple_lambda_reader_signal<Value, Read>,
-          Value,
-          move_activated_signal>
-{
-    simple_lambda_reader_signal(Read read)
-        : read_(read), value_(decltype(read())())
-    {
-    }
-    bool
-    has_value() const override
-    {
-        return true;
-    }
-    Value const&
-    read() const override
-    {
-        value_ = read_();
-        return value_;
-    }
-    Value
-    move_out() const override
-    {
-        return read_();
-    }
-    Value&
-    destructive_ref() const override
-    {
-        value_ = read_();
-        return value_;
-    }
-
- private:
-    Read read_;
-    mutable decltype(read_()) value_;
-};
-template<class Read>
-auto
-lambda_reader(Read read)
-{
-    return simple_lambda_reader_signal<std::decay_t<decltype(read())>, Read>(
-        read);
-}
-
-// lambda_reader(has_value, read) creates a read-only signal whose value is
-// determined by calling :has_value and :read.
-template<class Value, class HasValue, class Read>
-struct lambda_reader_signal : regular_signal<
-                                  lambda_reader_signal<Value, HasValue, Read>,
-                                  Value,
-                                  move_activated_signal>
-{
-    lambda_reader_signal(HasValue has_value, Read read)
-        : has_value_(has_value), read_(read), value_(decltype(read())())
-    {
-    }
-    bool
-    has_value() const override
-    {
-        return has_value_();
-    }
-    Value const&
-    read() const override
-    {
-        value_ = read_();
-        return value_;
-    }
-    Value
-    move_out() const override
-    {
-        return read_();
-    }
-    Value&
-    destructive_ref() const override
-    {
-        value_ = read_();
-        return value_;
-    }
-
- private:
-    HasValue has_value_;
-    Read read_;
-    mutable decltype(read_()) value_;
-};
-template<class HasValue, class Read>
-auto
-lambda_reader(HasValue has_value, Read read)
-{
-    return lambda_reader_signal<
-        std::decay_t<decltype(read())>,
-        HasValue,
-        Read>(has_value, read);
-}
-
-// lambda_reader(has_value, read, generate_id) creates a read-only signal
-// whose value is determined by calling :has_value and :read and whose ID is
-// determined by calling :generate_id.
-template<class Value, class HasValue, class Read, class GenerateId>
-struct lambda_reader_signal_with_id
-    : signal<
-          lambda_reader_signal_with_id<Value, HasValue, Read, GenerateId>,
-          Value,
-          move_activated_signal>
-{
-    lambda_reader_signal_with_id(
-        HasValue has_value, Read read, GenerateId generate_id)
-        : has_value_(has_value),
-          read_(read),
-          value_(decltype(read())()),
-          generate_id_(generate_id)
-    {
-    }
-    id_interface const&
-    value_id() const override
-    {
-        id_ = generate_id_();
-        return id_;
-    }
-    bool
-    has_value() const override
-    {
-        return has_value_();
-    }
-    Value const&
-    read() const override
-    {
-        value_ = read_();
-        return value_;
-    }
-    Value
-    move_out() const override
-    {
-        return read_();
-    }
-    Value&
-    destructive_ref() const override
-    {
-        value_ = read_();
-        return value_;
-    }
-
- private:
-    HasValue has_value_;
-    Read read_;
-    mutable decltype(read_()) value_;
-    GenerateId generate_id_;
-    mutable decltype(generate_id_()) id_;
-};
-template<class HasValue, class Read, class GenerateId>
-auto
-lambda_reader(HasValue has_value, Read read, GenerateId generate_id)
-{
-    return lambda_reader_signal_with_id<
-        std::decay_t<decltype(read())>,
-        HasValue,
-        Read,
-        GenerateId>(has_value, read, generate_id);
-}
-
-// lambda_duplex(has_value, read, ready_to_write, write) creates a duplex
-// signal whose value is read by calling :has_value and :read and written by
-// calling :ready_to_write and :write.
-template<
-    class Value,
-    class HasValue,
-    class Read,
-    class ReadyToWrite,
-    class Write>
-struct lambda_duplex_signal
-    : regular_signal<
-          lambda_duplex_signal<Value, HasValue, Read, ReadyToWrite, Write>,
-          Value,
-          move_activated_duplex_signal>
-{
-    lambda_duplex_signal(
-        HasValue has_value,
-        Read read,
-        ReadyToWrite ready_to_write,
-        Write write)
-        : has_value_(has_value),
-          read_(read),
-          value_(decltype(read())()),
-          ready_to_write_(ready_to_write),
-          write_(write)
-    {
-    }
-    bool
-    has_value() const override
-    {
-        return has_value_();
-    }
-    Value const&
-    read() const override
-    {
-        value_ = read_();
-        return value_;
-    }
-    Value
-    move_out() const override
-    {
-        return read_();
-    }
-    Value&
-    destructive_ref() const override
-    {
-        value_ = read_();
-        return value_;
-    }
-    bool
-    ready_to_write() const override
-    {
-        return ready_to_write_();
-    }
-    void
-    write(Value value) const override
-    {
-        write_(std::move(value));
-    }
-
- private:
-    HasValue has_value_;
-    Read read_;
-    mutable decltype(read_()) value_;
-    ReadyToWrite ready_to_write_;
-    Write write_;
-};
-template<class HasValue, class Read, class ReadyToWrite, class Write>
-auto
-lambda_duplex(
-    HasValue has_value, Read read, ReadyToWrite ready_to_write, Write write)
-{
-    return lambda_duplex_signal<
-        std::decay_t<decltype(read())>,
-        HasValue,
-        Read,
-        ReadyToWrite,
-        Write>(has_value, read, ready_to_write, write);
-}
-
-// lambda_duplex(has_value, read, ready_to_write, write, generate_id) creates a
-// duplex signal whose value is read by calling :has_value and :read and
-// written by calling :ready_to_write and :write. Its ID is determined by
-// calling :generate_id.
-template<
-    class Value,
-    class HasValue,
-    class Read,
-    class ReadyToWrite,
-    class Write,
-    class GenerateId>
-struct lambda_duplex_signal_with_id : signal<
-                                          lambda_duplex_signal_with_id<
-                                              Value,
-                                              HasValue,
-                                              Read,
-                                              ReadyToWrite,
-                                              Write,
-                                              GenerateId>,
-                                          Value,
-                                          move_activated_duplex_signal>
-{
-    lambda_duplex_signal_with_id(
-        HasValue has_value,
-        Read read,
-        ReadyToWrite ready_to_write,
-        Write write,
-        GenerateId generate_id)
-        : has_value_(has_value),
-          read_(read),
-          value_(decltype(read())()),
-          ready_to_write_(ready_to_write),
-          write_(write),
-          generate_id_(generate_id)
-    {
-    }
-    id_interface const&
-    value_id() const override
-    {
-        id_ = generate_id_();
-        return id_;
-    }
-    bool
-    has_value() const override
-    {
-        return has_value_();
-    }
-    Value const&
-    read() const override
-    {
-        value_ = read_();
-        return value_;
-    }
-    Value
-    move_out() const override
-    {
-        return read_();
-    }
-    Value&
-    destructive_ref() const override
-    {
-        value_ = read_();
-        return value_;
-    }
-    bool
-    ready_to_write() const override
-    {
-        return ready_to_write_();
-    }
-    void
-    write(Value value) const override
-    {
-        write_(std::move(value));
-    }
-
- private:
-    HasValue has_value_;
-    Read read_;
-    mutable decltype(read_()) value_;
-    ReadyToWrite ready_to_write_;
-    Write write_;
-    GenerateId generate_id_;
-    mutable decltype(generate_id_()) id_;
-};
-template<
-    class HasValue,
-    class Read,
-    class ReadyToWrite,
-    class Write,
-    class GenerateId>
-auto
-lambda_duplex(
-    HasValue has_value,
-    Read read,
-    ReadyToWrite ready_to_write,
-    Write write,
-    GenerateId generate_id)
-{
-    return lambda_duplex_signal_with_id<
-        std::decay_t<decltype(read())>,
-        HasValue,
-        Read,
-        ReadyToWrite,
-        Write,
-        GenerateId>(has_value, read, ready_to_write, write, generate_id);
-}
-
-// This is just a clear and concise way of indicating that a lambda signal
-// always has a value.
-inline bool
-always_has_value()
-{
-    return true;
-}
-
-// This is just a clear and concise way of indicating that a lambda signal is
-// always ready to write.
-inline bool
-always_ready()
-{
-    return true;
-}
-
-} // namespace alia
-
-
-
-namespace alia {
-
-enum class async_status
-{
-    UNREADY,
-    LAUNCHED,
-    COMPLETE,
-    FAILED
-};
-
-template<class Value>
-struct async_operation_data
-{
-    async_status status = async_status::UNREADY;
-    // This is used to identify the result of the operation. It's incremented
-    // every time the inputs change.
-    counter_type version = 0;
-    // If status is COMPLETE, this is the result.
-    Value result;
-    // If status is FAILED, this is the error.
-    std::exception_ptr error;
-};
-
-template<class Value>
-void
-reset(async_operation_data<Value>& data)
-{
-    ++data.version;
-    data.status = async_status::UNREADY;
-}
-
-template<class Value>
-struct async_signal : signal<async_signal<Value>, Value, read_only_signal>
-{
-    async_signal(async_operation_data<Value>& data) : data_(&data)
-    {
-    }
-    id_interface const&
-    value_id() const
-    {
-        id_ = make_id(data_->version);
-        return id_;
-    }
-    bool
-    has_value() const
-    {
-        return data_->status == async_status::COMPLETE;
-    }
-    Value const&
-    read() const
-    {
-        return data_->result;
-    }
-
- private:
-    async_operation_data<Value>* data_;
-    mutable simple_id<counter_type> id_;
-};
-
-template<class Value>
-async_signal<Value>
-make_async_signal(async_operation_data<Value>& data)
-{
-    return async_signal<Value>(data);
-}
-
-template<class Result>
-void
-process_async_args(context, async_operation_data<Result>&, bool&)
-{
-}
-template<class Result, class Arg, class... Rest>
-void
-process_async_args(
-    context ctx,
-    async_operation_data<Result>& data,
-    bool& args_ready,
-    Arg const& arg,
-    Rest const&... rest)
-{
-    captured_id* cached_id;
-    get_cached_data(ctx, &cached_id);
-    if (is_refresh_event(ctx))
-    {
-        if (!signal_has_value(arg))
-        {
-            reset(data);
-            args_ready = false;
-        }
-        else if (!cached_id->matches(arg.value_id()))
-        {
-            reset(data);
-            cached_id->capture(arg.value_id());
-        }
-    }
-    process_async_args(ctx, data, args_ready, rest...);
-}
-
-template<class Result>
-struct async_reporter
-{
-    void
-    report_success(Result result) const
-    {
-        auto& data = *data_;
-        if (data.version == version_)
-        {
-            data.result = std::move(result);
-            data.status = async_status::COMPLETE;
-            mark_dirty_component(container_);
-            refresh_system(*system_);
-        }
-    }
-
-    void
-    report_failure(std::exception_ptr error) const
-    {
-        auto& data = *data_;
-        if (data.version == version_)
-        {
-            data.status = async_status::FAILED;
-            data.error = error;
-            mark_dirty_component(container_);
-            refresh_system(*system_);
-        }
-    }
-
-    std::shared_ptr<async_operation_data<Result>> data_;
-    counter_type version_;
-    alia::system* system_;
-    component_container_ptr container_;
-};
-
-template<class Result, class Context, class Launcher, class... Args>
-auto
-async(Context ctx, Launcher launcher, Args const&... args)
-{
-    std::shared_ptr<async_operation_data<Result>>& data_ptr
-        = get_cached_data<std::shared_ptr<async_operation_data<Result>>>(ctx);
-    if (!data_ptr)
-        data_ptr.reset(new async_operation_data<Result>);
-    auto& data = *data_ptr;
-
-    bool args_ready = true;
-    process_async_args(ctx, data, args_ready, args...);
-
-    on_refresh(ctx, [&](auto ctx) {
-        if (data.status == async_status::UNREADY && args_ready)
-        {
-            try
-            {
-                auto reporter = async_reporter<Result>{
-                    data_ptr,
-                    data.version,
-                    &get<system_tag>(ctx),
-                    get_active_component_container(ctx)};
-                launcher(ctx, reporter, read_signal(args)...);
-                data.status = async_status::LAUNCHED;
-            }
-            catch (...)
-            {
-                data.error = std::current_exception();
-                data.status = async_status::FAILED;
-            }
-        }
-        if (data.status == async_status::FAILED)
-            std::rethrow_exception(data.error);
-    });
-
-    return make_async_signal(data);
-}
-
-} // namespace alia
-
-
-
-#include <cmath>
-
-// This file defines some numerical adaptors for signals.
-
-namespace alia {
-
-// scale(n, factor) creates a new signal that presents a scaled view of :n,
-// where :n and :factor are both numeric signals.
-template<class N, class Factor>
-struct scaled_signal
-    : lazy_signal_wrapper<
-          scaled_signal<N, Factor>,
-          N,
-          typename N::value_type,
-          signal_capabilities<signal_move_activated, N::capabilities::writing>>
-{
-    scaled_signal(N n, Factor scale_factor)
-        : scaled_signal::lazy_signal_wrapper(std::move(n)),
-          scale_factor_(std::move(scale_factor))
-    {
-    }
-    bool
-    has_value() const override
-    {
-        return this->wrapped_.has_value() && scale_factor_.has_value();
-    }
-    typename N::value_type
-    move_out() const override
-    {
-        return this->wrapped_.read() * scale_factor_.read();
-    }
-    id_interface const&
-    value_id() const override
-    {
-        id_ = combine_ids(
-            ref(this->wrapped_.value_id()), ref(scale_factor_.value_id()));
-        return id_;
-    }
-    bool
-    ready_to_write() const override
-    {
-        return this->wrapped_.ready_to_write() && scale_factor_.has_value();
-    }
-    void
-    write(typename N::value_type value) const override
-    {
-        this->wrapped_.write(value / forward_signal(scale_factor_));
-    }
-
- private:
-    Factor scale_factor_;
-    mutable id_pair<id_ref, id_ref> id_;
-};
-template<class N, class Factor>
-scaled_signal<N, Factor>
-make_scaled_signal(N n, Factor scale_factor)
-{
-    return scaled_signal<N, Factor>(std::move(n), std::move(scale_factor));
-}
-template<class N, class Factor>
-auto
-scale(N n, Factor scale_factor)
-{
-    return make_scaled_signal(
-        std::move(n), signalize(std::move(scale_factor)));
-}
-
-// offset(n, offset) presents an offset view of :n.
-template<class N, class Offset>
-struct offset_signal
-    : lazy_signal_wrapper<
-          offset_signal<N, Offset>,
-          N,
-          typename N::value_type,
-          signal_capabilities<signal_move_activated, N::capabilities::writing>>
-{
-    offset_signal(N n, Offset offset)
-        : offset_signal::lazy_signal_wrapper(std::move(n)),
-          offset_(std::move(offset))
-    {
-    }
-    bool
-    has_value() const override
-    {
-        return this->wrapped_.has_value() && offset_.has_value();
-    }
-    typename N::value_type
-    move_out() const override
-    {
-        return this->wrapped_.read() + offset_.read();
-    }
-    id_interface const&
-    value_id() const override
-    {
-        id_ = combine_ids(
-            ref(this->wrapped_.value_id()), ref(offset_.value_id()));
-        return id_;
-    }
-    bool
-    ready_to_write() const override
-    {
-        return this->wrapped_.ready_to_write() && offset_.has_value();
-    }
-    void
-    write(typename N::value_type value) const override
-    {
-        this->wrapped_.write(value - forward_signal(offset_));
-    }
-
- private:
-    Offset offset_;
-    mutable id_pair<id_ref, id_ref> id_;
-};
-template<class N, class Offset>
-offset_signal<N, Offset>
-make_offset_signal(N n, Offset offset)
-{
-    return offset_signal<N, Offset>(std::move(n), std::move(offset));
-}
-template<class N, class Offset>
-auto
-offset(N n, Offset offset)
-{
-    return make_offset_signal(std::move(n), signalize(std::move(offset)));
-}
-
-// round_signal_writes(n, step) yields a wrapper which rounds any writes to
-// :n so that values are always a multiple of :step.
-template<class N, class Step>
-struct rounding_signal_wrapper
-    : signal_wrapper<rounding_signal_wrapper<N, Step>, N>
-{
-    rounding_signal_wrapper(N n, Step step)
-        : rounding_signal_wrapper::signal_wrapper(std::move(n)),
-          step_(std::move(step))
-    {
-    }
-    bool
-    ready_to_write() const override
-    {
-        return this->wrapped_.ready_to_write() && step_.has_value();
-    }
-    void
-    write(typename N::value_type value) const override
-    {
-        typename N::value_type step = step_.read();
-        this->wrapped_.write(
-            std::floor(value / step + typename N::value_type(0.5)) * step);
-    }
-
- private:
-    Step step_;
-};
-template<class N, class Step>
-rounding_signal_wrapper<N, Step>
-make_rounding_signal_wrapper(N n, Step step)
-{
-    return rounding_signal_wrapper<N, Step>(std::move(n), std::move(step));
-}
-template<class N, class Step>
-auto
-round_signal_writes(N n, Step step)
-{
-    return make_rounding_signal_wrapper(
-        std::move(n), signalize(std::move(step)));
-}
-
-} // namespace alia
 
 
 
@@ -9049,10 +5758,7 @@ start(animation_timer& timer)
 } // namespace alia
 
 
-
-
-
-
+#include <vector>
 
 // This file defines the default implementation for tracking timer events.
 
@@ -9275,6 +5981,155 @@ stop(timer& timer)
 
 namespace alia {
 
+// The following is a small utility used for deflickering...
+
+template<class Value>
+struct captured_value
+{
+    bool valid = false;
+    Value value;
+    captured_id id;
+};
+
+template<class Value>
+void
+clear(captured_value<Value>& captured)
+{
+    captured.valid = false;
+    captured.id.clear();
+}
+
+template<class Value, class Signal>
+void
+capture(captured_value<Value>& captured, Signal const& signal)
+{
+    captured.value = signal.read();
+    captured.id.capture(signal.value_id());
+    captured.valid = true;
+}
+
+// deflicker(ctx, x, delay) returns a deflickered version of the signal :x.
+//
+// Whenever :x has a value, the deflickered signal carries the same value.
+// Whenever :x loses its value, the deflickered signal retains the old value
+// for a period of time, given by :delay. (If a new value arrives on :x during
+// this period, it will pick that up instead.)
+//
+// :delay is specified in milliseconds and can be either a raw value or a
+// signal. It defaults to 250 ms.
+//
+
+unsigned const default_deflicker_delay = 250;
+
+template<class Value>
+struct deflickering_data
+{
+    timer_data timer;
+    captured_value<Value> captured;
+};
+
+template<class Wrapped>
+struct deflickering_signal
+    : signal_wrapper<deflickering_signal<Wrapped>, Wrapped>
+{
+    deflickering_signal()
+    {
+    }
+    deflickering_signal(
+        Wrapped wrapped,
+        captured_value<typename Wrapped::value_type>& captured)
+        : deflickering_signal::signal_wrapper(wrapped), captured_(captured)
+    {
+    }
+    bool
+    has_value() const
+    {
+        return captured_.valid;
+    }
+    typename Wrapped::value_type const&
+    read() const
+    {
+        return captured_.value;
+    }
+    id_interface const&
+    value_id() const
+    {
+        return captured_.id.is_initialized() ? captured_.id.get() : null_id;
+    }
+
+ private:
+    captured_value<typename Wrapped::value_type>& captured_;
+};
+
+template<class Signal, class Value, class Delay = millisecond_count>
+deflickering_signal<Signal>
+deflicker(
+    dataless_context ctx,
+    deflickering_data<Value>& data,
+    Signal x,
+    Delay delay = default_deflicker_delay)
+{
+    auto delay_signal = signalize(delay);
+
+    timer timer(ctx, data.timer);
+    if (timer.is_triggered())
+    {
+        // If the timer is triggered, it means we were holding a stale value
+        // and it's time to clear it out.
+        clear(data.captured);
+        abort_traversal(ctx);
+    }
+
+    refresh_handler(ctx, [&](auto) {
+        if (x.has_value())
+        {
+            if (x.value_id() != data.captured.id)
+            {
+                // :x is carrying a different value than the one we have
+                // captured, so capture the new one.
+                capture(data.captured, x);
+                // If we had an active timer, stop it.
+                timer.stop();
+            }
+        }
+        else
+        {
+            if (data.captured.id.is_initialized() && !timer.is_active())
+            {
+                // :x has no value, and this is apparently the first time we've
+                // noticed that, so start the timer.
+                if (signal_has_value(delay_signal))
+                {
+                    timer.start(read_signal(delay_signal));
+                }
+                else
+                {
+                    // If the delay isn't readable, we can't start the timer,
+                    // so just drop the value immediately.
+                    clear(data.captured);
+                }
+            }
+        }
+    });
+
+    return deflickering_signal<Signal>(x, data.captured);
+}
+
+template<class Signal, class Delay = millisecond_count>
+deflickering_signal<Signal>
+deflicker(context ctx, Signal x, Delay delay = default_deflicker_delay)
+{
+    typedef typename Signal::value_type value_type;
+    auto& data = get_cached_data<deflickering_data<value_type>>(ctx);
+    return deflicker(ctx, data, x, delay);
+}
+
+} // namespace alia
+
+
+
+namespace alia {
+
 namespace detail {
 
 value_signal<bool>
@@ -9316,7 +6171,6 @@ square_wave(
 }
 
 } // namespace alia
-
 
 
 namespace alia {
@@ -9364,6 +6218,8 @@ eval_curve_at_x(
 } // namespace alia
 
 
+
+#include <cmath>
 
 namespace alia {
 
@@ -9556,147 +6412,100 @@ smooth(
 
 namespace alia {
 
-// The following is a small utility used for deflickering...
+// make_returnable_ref(ctx, x) stores a copy of x within the data graph of ctx
+// and returns a reference to that copy. (It will move instead of copying when
+// possible.)
 
-template<class Value>
-struct captured_value
+template<class T>
+struct returnable_ref_node : data_node
 {
-    bool valid = false;
-    Value value;
-    captured_id id;
+    T value;
+
+    returnable_ref_node(T& x) : value(std::move(x))
+    {
+    }
 };
 
-template<class Value>
+template<class T>
+T&
+make_returnable_ref(context ctx, T x)
+{
+    returnable_ref_node<T>* node;
+    if (!get_data_node(
+            ctx, &node, [&] { return new returnable_ref_node<T>(x); }))
+    {
+        node->value = std::move(x);
+    }
+    return node->value;
+}
+
+} // namespace alia
+
+
+
+namespace alia {
+
+namespace detail {
+
+template<class Context>
+struct if_stub
+{
+    template<class Condition, class Body>
+    if_stub
+    else_if_(Condition condition, Body&& body);
+
+    template<class Body>
+    void
+    else_(Body&& body);
+
+    Context ctx_;
+    bool else_condition_;
+};
+
+template<class Context, class Condition, class Body>
+if_stub<Context>
+if_(Context ctx, bool inherited_condition, Condition condition, Body&& body)
+{
+    bool else_condition;
+
+    ALIA_IF(inherited_condition && condition)
+    {
+        std::forward<Body>(body)();
+    }
+    // Hacking the macros...
+    // clang-format off
+    }
+    else_condition = inherited_condition && _alia_else_condition;
+    {
+    // clang-format on
+    ALIA_END
+
+    return if_stub<Context>{ctx, else_condition};
+}
+
+template<class Context>
+template<class Condition, class Body>
+if_stub<Context>
+if_stub<Context>::else_if_(Condition condition, Body&& body)
+{
+    return if_(this->ctx_, this->else_condition_, condition, body);
+}
+
+template<class Context>
+template<class Body>
 void
-clear(captured_value<Value>& captured)
+if_stub<Context>::else_(Body&& body)
 {
-    captured.valid = false;
-    captured.id.clear();
+    if_(this->ctx_, this->else_condition_, true, body);
 }
 
-template<class Value, class Signal>
-void
-capture(captured_value<Value>& captured, Signal const& signal)
+} // namespace detail
+
+template<class Context, class Condition, class Body>
+detail::if_stub<Context>
+if_(Context ctx, Condition condition, Body&& body)
 {
-    captured.value = signal.read();
-    captured.id.capture(signal.value_id());
-    captured.valid = true;
-}
-
-// deflicker(ctx, x, delay) returns a deflickered version of the signal :x.
-//
-// Whenever :x has a value, the deflickered signal carries the same value.
-// Whenever :x loses its value, the deflickered signal retains the old value
-// for a period of time, given by :delay. (If a new value arrives on :x during
-// this period, it will pick that up instead.)
-//
-// :delay is specified in milliseconds and can be either a raw value or a
-// signal. It defaults to 250 ms.
-//
-
-unsigned const default_deflicker_delay = 250;
-
-template<class Value>
-struct deflickering_data
-{
-    timer_data timer;
-    captured_value<Value> captured;
-};
-
-template<class Wrapped>
-struct deflickering_signal
-    : signal_wrapper<deflickering_signal<Wrapped>, Wrapped>
-{
-    deflickering_signal()
-    {
-    }
-    deflickering_signal(
-        Wrapped wrapped,
-        captured_value<typename Wrapped::value_type>& captured)
-        : deflickering_signal::signal_wrapper(wrapped), captured_(captured)
-    {
-    }
-    bool
-    has_value() const
-    {
-        return captured_.valid;
-    }
-    typename Wrapped::value_type const&
-    read() const
-    {
-        return captured_.value;
-    }
-    id_interface const&
-    value_id() const
-    {
-        return captured_.id.is_initialized() ? captured_.id.get() : null_id;
-    }
-
- private:
-    captured_value<typename Wrapped::value_type>& captured_;
-};
-
-template<class Signal, class Value, class Delay = millisecond_count>
-deflickering_signal<Signal>
-deflicker(
-    dataless_context ctx,
-    deflickering_data<Value>& data,
-    Signal x,
-    Delay delay = default_deflicker_delay)
-{
-    auto delay_signal = signalize(delay);
-
-    timer timer(ctx, data.timer);
-    if (timer.is_triggered())
-    {
-        // If the timer is triggered, it means we were holding a stale value
-        // and it's time to clear it out.
-        clear(data.captured);
-        abort_traversal(ctx);
-    }
-
-    on_refresh(ctx, [&](auto) {
-        if (x.has_value())
-        {
-            if (x.value_id() != data.captured.id)
-            {
-                // :x is carrying a different value than the one we have
-                // captured, so capture the new one.
-                capture(data.captured, x);
-                // If we had an active timer, stop it.
-                timer.stop();
-            }
-        }
-        else
-        {
-            if (data.captured.id.is_initialized() && !timer.is_active())
-            {
-                // :x has no value, and this is apparently the first time we've
-                // noticed that, so start the timer.
-                if (signal_has_value(delay_signal))
-                {
-                    timer.start(read_signal(delay_signal));
-                }
-                else
-                {
-                    // If the delay isn't readable, we can't start the timer,
-                    // so just drop the value immediately.
-                    clear(data.captured);
-                }
-            }
-        }
-    });
-
-    return deflickering_signal<Signal>(x, data.captured);
-}
-
-template<class Signal, class Delay = millisecond_count>
-deflickering_signal<Signal>
-deflicker(context ctx, Signal x, Delay delay = default_deflicker_delay)
-{
-    typedef typename Signal::value_type value_type;
-    auto& data = get_cached_data<deflickering_data<value_type>>(ctx);
-    return deflicker(ctx, data, x, delay);
+    return detail::if_(ctx, true, condition, body);
 }
 
 } // namespace alia
@@ -9863,224 +6672,6 @@ struct catch_block
 #define alia_catch_(ctx, pattern) ALIA_CATCH_(ctx, pattern)
 #define alia_catch(pattern) ALIA_CATCH(pattern)
 #endif
-
-} // namespace alia
-
-
-
-namespace alia {
-
-// make_returnable_ref(ctx, x) stores a copy of x within the data graph of ctx
-// and returns a reference to that copy. (It will move instead of copying when
-// possible.)
-
-template<class T>
-struct returnable_ref_node : data_node
-{
-    T value;
-
-    returnable_ref_node(T& x) : value(std::move(x))
-    {
-    }
-};
-
-template<class T>
-T&
-make_returnable_ref(context ctx, T x)
-{
-    returnable_ref_node<T>* node;
-    if (!get_data_node(
-            ctx, &node, [&] { return new returnable_ref_node<T>(x); }))
-    {
-        node->value = std::move(x);
-    }
-    return node->value;
-}
-
-} // namespace alia
-
-
-
-namespace alia {
-
-template<class Object, class Content>
-auto
-implement_alia_content_caching(context, Object&, bool, Content content)
-{
-    return content;
-}
-
-struct component_caching_data
-{
-    data_block context_setup_block;
-    data_block content_block;
-    component_container_ptr container;
-    captured_id content_id;
-    std::exception_ptr exception;
-};
-
-template<class Context, class Component, class... Args>
-void
-invoke_pure_component(Context ctx, Component&& component, Args&&... args)
-{
-    component_caching_data* data;
-    if (get_data(ctx, &data))
-        data->container.reset(new component_container);
-
-    scoped_component_container container(ctx, &data->container);
-
-    auto invoke_content = [&]() {
-        scoped_data_block content_block(ctx, data->content_block);
-        component(ctx, std::forward<Args>(args)...);
-    };
-
-    if (is_refresh_event(ctx))
-    {
-        // If the component is explicitly marked as dirty or animating, then we
-        // need to visit it regardless.
-        bool content_traversal_required
-            = container.is_dirty() || container.is_animating();
-
-        // Construct the combined ID of the context and the arguments to this
-        // component.
-        auto content_id
-            = combine_ids(ref(get_content_id(ctx)), ref(args.value_id())...);
-        // And check if it still matches.
-        if (!data->content_id.matches(content_id))
-            content_traversal_required = true;
-
-        // If the component code is generating an exception and we have no
-        // reason to revisit it, just rethrow the exception.
-        if (!content_traversal_required && data->exception)
-        {
-            std::rethrow_exception(data->exception);
-        }
-
-        // This is a bit convoluted, but here we use a fold over the context
-        // objects to construct a function object that will implement content
-        // caching for this component. Most context objects don't care about
-        // caching, so they'll use the default implementation (which doesn't
-        // contribute any code to the function object). Context objects that
-        // are managing object trees will insert code to handle that. At the
-        // heart of the function object is the code to actually invoke the
-        // component (if necessary).
-        //
-        // I'm sure this could be done more directly with some effort, but it's
-        // fine for now.
-        //
-        scoped_data_block context_setup(ctx, data->context_setup_block);
-        auto invoker = alia::fold_over_collection(
-            get_structural_collection(ctx),
-            [&](auto, auto& object, auto content) {
-                return implement_alia_content_caching(
-                    ctx, object, content_traversal_required, content);
-            },
-            [&]() {
-                if (content_traversal_required)
-                {
-                    data->exception = nullptr;
-                    // Capture the ID of the component in this state.
-                    // Note that even a captured exception is considered a
-                    // "successful" traversal because we know that the
-                    // component is currently just generating that exception.
-                    data->content_id.capture(content_id);
-                    try
-                    {
-                        invoke_content();
-                    }
-                    catch (alia::traversal_abortion&)
-                    {
-                        throw;
-                    }
-                    catch (...)
-                    {
-                        data->exception = std::current_exception();
-                        throw;
-                    }
-                }
-            });
-        // Now execute that function that we just constructed.
-        invoker();
-    }
-    else
-    {
-        // This is not a refresh event, so all we need to know if whether or
-        // not this component is on the route to the event target.
-        if (container.is_on_route())
-        {
-            invoke_content();
-        }
-    }
-}
-
-} // namespace alia
-
-
-
-namespace alia {
-
-namespace detail {
-
-template<class Context>
-struct if_stub
-{
-    template<class Condition, class Body>
-    if_stub
-    else_if_(Condition condition, Body&& body);
-
-    template<class Body>
-    void
-    else_(Body&& body);
-
-    Context ctx_;
-    bool else_condition_;
-};
-
-template<class Context, class Condition, class Body>
-if_stub<Context>
-if_(Context ctx, bool inherited_condition, Condition condition, Body&& body)
-{
-    bool else_condition;
-
-    ALIA_IF(inherited_condition && condition)
-    {
-        std::forward<Body>(body)();
-    }
-    // Hacking the macros...
-    // clang-format off
-    }
-    else_condition = inherited_condition && _alia_else_condition;
-    {
-    // clang-format on
-    ALIA_END
-
-    return if_stub<Context>{ctx, else_condition};
-}
-
-template<class Context>
-template<class Condition, class Body>
-if_stub<Context>
-if_stub<Context>::else_if_(Condition condition, Body&& body)
-{
-    return if_(this->ctx_, this->else_condition_, condition, body);
-}
-
-template<class Context>
-template<class Body>
-void
-if_stub<Context>::else_(Body&& body)
-{
-    if_(this->ctx_, this->else_condition_, true, body);
-}
-
-} // namespace detail
-
-template<class Context, class Condition, class Body>
-detail::if_stub<Context>
-if_(Context ctx, Condition condition, Body&& body)
-{
-    return detail::if_(ctx, true, condition, body);
-}
 
 } // namespace alia
 
@@ -10519,6 +7110,3486 @@ implement_alia_content_caching(
 
 } // namespace alia
 
+
+
+namespace alia {
+
+template<class Object, class Content>
+auto
+implement_alia_content_caching(context, Object&, bool, Content content)
+{
+    return content;
+}
+
+struct component_caching_data
+{
+    data_block context_setup_block;
+    data_block content_block;
+    component_container_ptr container;
+    captured_id content_id;
+    std::exception_ptr exception;
+};
+
+template<class Context, class Component, class... Args>
+void
+invoke_pure_component(Context ctx, Component&& component, Args&&... args)
+{
+    component_caching_data* data;
+    if (get_data(ctx, &data))
+        data->container.reset(new component_container);
+
+    scoped_component_container container(ctx, &data->container);
+
+    auto invoke_content = [&]() {
+        scoped_data_block content_block(ctx, data->content_block);
+        component(ctx, std::forward<Args>(args)...);
+    };
+
+    if (is_refresh_event(ctx))
+    {
+        // If the component is explicitly marked as dirty or animating, then we
+        // need to visit it regardless.
+        bool content_traversal_required
+            = container.is_dirty() || container.is_animating();
+
+        // Construct the combined ID of the context and the arguments to this
+        // component.
+        auto content_id
+            = combine_ids(ref(get_content_id(ctx)), ref(args.value_id())...);
+        // And check if it still matches.
+        if (!data->content_id.matches(content_id))
+            content_traversal_required = true;
+
+        // If the component code is generating an exception and we have no
+        // reason to revisit it, just rethrow the exception.
+        if (!content_traversal_required && data->exception)
+        {
+            std::rethrow_exception(data->exception);
+        }
+
+        // This is a bit convoluted, but here we use a fold over the context
+        // objects to construct a function object that will implement content
+        // caching for this component. Most context objects don't care about
+        // caching, so they'll use the default implementation (which doesn't
+        // contribute any code to the function object). Context objects that
+        // are managing object trees will insert code to handle that. At the
+        // heart of the function object is the code to actually invoke the
+        // component (if necessary).
+        //
+        // I'm sure this could be done more directly with some effort, but it's
+        // fine for now.
+        //
+        scoped_data_block context_setup(ctx, data->context_setup_block);
+        auto invoker = alia::fold_over_collection(
+            get_structural_collection(ctx),
+            [&](auto, auto& object, auto content) {
+                return implement_alia_content_caching(
+                    ctx, object, content_traversal_required, content);
+            },
+            [&]() {
+                if (content_traversal_required)
+                {
+                    data->exception = nullptr;
+                    // Capture the ID of the component in this state.
+                    // Note that even a captured exception is considered a
+                    // "successful" traversal because we know that the
+                    // component is currently just generating that exception.
+                    data->content_id.capture(content_id);
+                    try
+                    {
+                        invoke_content();
+                    }
+                    catch (alia::traversal_abortion&)
+                    {
+                        throw;
+                    }
+                    catch (...)
+                    {
+                        data->exception = std::current_exception();
+                        throw;
+                    }
+                }
+            });
+        // Now execute that function that we just constructed.
+        invoker();
+    }
+    else
+    {
+        // This is not a refresh event, so all we need to know if whether or
+        // not this component is on the route to the event target.
+        if (container.is_on_route())
+        {
+            invoke_content();
+        }
+    }
+}
+
+} // namespace alia
+
+
+
+
+
+namespace alia {
+
+// lazy_apply(f, args...), where :args are all signals, yields a signal
+// to the result of lazily applying the function :f to the values of :args.
+
+// Note that doing this in true variadic fashion is a little insane, so I'm
+// just doing the two overloads I need for now...
+
+template<class Result, class Function, class Arg>
+struct lazy_apply1_signal : lazy_signal<
+                                lazy_apply1_signal<Result, Function, Arg>,
+                                Result,
+                                move_activated_signal>
+{
+    lazy_apply1_signal(Function f, Arg arg)
+        : f_(std::move(f)), arg_(std::move(arg))
+    {
+    }
+    id_interface const&
+    value_id() const
+    {
+        return arg_.value_id();
+    }
+    bool
+    has_value() const
+    {
+        return arg_.has_value();
+    }
+    Result
+    move_out() const
+    {
+        return f_(forward_signal(arg_));
+    }
+
+ private:
+    Function f_;
+    Arg arg_;
+};
+template<class Function, class Arg>
+auto
+lazy_apply(Function f, Arg arg)
+{
+    return lazy_apply1_signal<decltype(f(forward_signal(arg))), Function, Arg>(
+        std::move(f), std::move(arg));
+}
+
+template<class Result, class Function, class Arg0, class Arg1>
+struct lazy_apply2_signal
+    : lazy_signal<
+          lazy_apply2_signal<Result, Function, Arg0, Arg1>,
+          Result,
+          move_activated_signal>
+{
+    lazy_apply2_signal(Function f, Arg0 arg0, Arg1 arg1)
+        : f_(std::move(f)), arg0_(std::move(arg0)), arg1_(std::move(arg1))
+    {
+    }
+    id_interface const&
+    value_id() const
+    {
+        id_ = combine_ids(ref(arg0_.value_id()), ref(arg1_.value_id()));
+        return id_;
+    }
+    bool
+    has_value() const
+    {
+        return arg0_.has_value() && arg1_.has_value();
+    }
+    Result
+    move_out() const
+    {
+        return f_(forward_signal(arg0_), forward_signal(arg1_));
+    }
+
+ private:
+    Function f_;
+    Arg0 arg0_;
+    Arg1 arg1_;
+    mutable id_pair<id_ref, id_ref> id_;
+};
+template<class Function, class Arg0, class Arg1>
+auto
+lazy_apply(Function f, Arg0 arg0, Arg1 arg1)
+{
+    return lazy_apply2_signal<
+        decltype(f(forward_signal(arg0), forward_signal(arg1))),
+        Function,
+        Arg0,
+        Arg1>(f, std::move(arg0), std::move(arg1));
+}
+
+template<class Function>
+auto
+lazy_lift(Function f)
+{
+    return [=](auto... args) { return lazy_apply(f, std::move(args)...); };
+}
+
+// duplex_lazy_apply(forward, reverse, arg), where :arg is a duplex signal,
+// yields another duplex signal whose value is the result of applying :forward
+// to the value of :arg. Writing to the resulting signal applies :reverse and
+// writes the result to :arg.
+// The applications in both directions are done lazily, on demand.
+
+namespace detail {
+
+template<class Result, class Forward, class Reverse, class Arg>
+struct lazy_duplex_apply_signal
+    : lazy_signal<
+          lazy_duplex_apply_signal<Result, Forward, Reverse, Arg>,
+          Result,
+          move_activated_duplex_signal>
+{
+    lazy_duplex_apply_signal(Forward forward, Reverse reverse, Arg arg)
+        : forward_(std::move(forward)),
+          reverse_(std::move(reverse)),
+          arg_(std::move(arg))
+    {
+    }
+    id_interface const&
+    value_id() const
+    {
+        return arg_.value_id();
+    }
+    bool
+    has_value() const
+    {
+        return arg_.has_value();
+    }
+    Result
+    move_out() const
+    {
+        return forward_(forward_signal(arg_));
+    }
+    bool
+    ready_to_write() const
+    {
+        return arg_.ready_to_write();
+    }
+    id_interface const&
+    write(Result value) const
+    {
+        return arg_.write(reverse_(std::move(value)));
+    }
+
+ private:
+    Forward forward_;
+    Reverse reverse_;
+    Arg arg_;
+};
+
+} // namespace detail
+
+template<class Forward, class Reverse, class Arg>
+auto
+lazy_duplex_apply(Forward forward, Reverse reverse, Arg arg)
+{
+    return detail::lazy_duplex_apply_signal<
+        decltype(forward(forward_signal(arg))),
+        Forward,
+        Reverse,
+        Arg>(std::move(forward), std::move(reverse), std::move(arg));
+}
+
+// apply(ctx, f, args...), where :args are all signals, yields a signal to the
+// result of applying the function :f to the values of :args. Unlike
+// lazy_apply, this is eager and caches and the result.
+
+namespace detail {
+
+enum class apply_status
+{
+    // The value hasn't been computed since the last time the inputs changed.
+    UNCOMPUTED,
+    // The calculation for the current value threw an exception.
+    FAILED,
+    // The value is calculated and up-to-date.
+    READY,
+    // The value was calculated but was subsequently moved out or accessed in
+    // a destructive manner. This is an in between state that should only
+    // exist in the middle of an action. The value is there, but probably isn't
+    // whole enough to be considered valid, so it should be recomputed on the
+    // next refresh.
+    MOVED
+};
+
+template<class Value>
+struct apply_result_data
+{
+    apply_status status = apply_status::UNCOMPUTED;
+    // This is used to identify the result of the apply. It's incremented every
+    // time the inputs change.
+    counter_type version = 0;
+    // If status is READY, this is the result.
+    Value value;
+    // If status is FAILED, this is the error.
+    std::exception_ptr error;
+};
+
+template<class Value>
+void
+reset(apply_result_data<Value>& data)
+{
+    ++data.version;
+    data.status = apply_status::UNCOMPUTED;
+}
+
+} // namespace detail
+
+template<class Value>
+struct apply_signal
+    : signal<apply_signal<Value>, Value, movable_read_only_signal>
+{
+    apply_signal(detail::apply_result_data<Value>& data) : data_(&data)
+    {
+    }
+    id_interface const&
+    value_id() const
+    {
+        id_ = make_id(data_->version);
+        return id_;
+    }
+    bool
+    has_value() const
+    {
+        return data_->status == detail::apply_status::READY
+               || data_->status == detail::apply_status::MOVED;
+    }
+    Value const&
+    read() const
+    {
+        return data_->value;
+    }
+    Value
+    move_out() const
+    {
+        auto moved_out = std::move(data_->value);
+        data_->status = detail::apply_status::MOVED;
+        return moved_out;
+    }
+    Value&
+    destructive_ref() const
+    {
+        data_->status = detail::apply_status::MOVED;
+        return data_->value;
+    }
+
+ private:
+    detail::apply_result_data<Value>* data_;
+    mutable simple_id<counter_type> id_;
+};
+
+namespace detail {
+
+template<class Value>
+apply_signal<Value>
+make_apply_signal(apply_result_data<Value>& data)
+{
+    return apply_signal<Value>(data);
+}
+
+template<class Result, class Arg>
+void
+process_apply_arg(
+    context ctx,
+    apply_result_data<Result>& data,
+    bool& args_ready,
+    captured_id& cached_id,
+    Arg const& arg)
+{
+    if (is_refresh_event(ctx))
+    {
+        if (!signal_has_value(arg))
+        {
+            reset(data);
+            args_ready = false;
+        }
+        else if (!cached_id.matches(arg.value_id()))
+        {
+            reset(data);
+            cached_id.capture(arg.value_id());
+        }
+    }
+}
+
+template<class Result>
+void
+process_apply_args(context, apply_result_data<Result>&, bool&)
+{
+}
+template<class Result, class Arg, class... Rest>
+void
+process_apply_args(
+    context ctx,
+    apply_result_data<Result>& data,
+    bool& args_ready,
+    Arg const& arg,
+    Rest const&... rest)
+{
+    captured_id* cached_id;
+    get_cached_data(ctx, &cached_id);
+    process_apply_arg(ctx, data, args_ready, *cached_id, arg);
+    process_apply_args(ctx, data, args_ready, rest...);
+}
+
+template<class Value, class Function, class... Args>
+void
+process_apply_body(
+    context ctx,
+    apply_result_data<Value>& data,
+    bool args_ready,
+    Function&& f,
+    Args const&... args)
+{
+    if (is_refresh_event(ctx))
+    {
+        if ((data.status == apply_status::UNCOMPUTED
+             || data.status == apply_status::MOVED)
+            && args_ready)
+        {
+            try
+            {
+                data.value
+                    = std::forward<Function>(f)(forward_signal(args)...);
+                data.status = apply_status::READY;
+            }
+            catch (...)
+            {
+                data.error = std::current_exception();
+                data.status = apply_status::FAILED;
+            }
+        }
+        if (data.status == apply_status::FAILED)
+            std::rethrow_exception(data.error);
+    }
+}
+
+} // namespace detail
+
+template<class Function, class... Args>
+auto
+apply(context ctx, Function&& f, Args const&... args)
+{
+    detail::apply_result_data<decltype(f(forward_signal(args)...))>* data_ptr;
+    get_cached_data(ctx, &data_ptr);
+    auto& data = *data_ptr;
+    bool args_ready = true;
+    process_apply_args(ctx, data, args_ready, args...);
+    process_apply_body(
+        ctx, data, args_ready, std::forward<Function>(f), args...);
+    return detail::make_apply_signal(data);
+}
+
+template<class Function>
+auto
+lift(Function f)
+{
+    return [=](context ctx, auto&&... args) {
+        return apply(ctx, std::move(f), std::move(args)...);
+    };
+}
+
+// duplex_apply(ctx, forward, reverse, arg), where :arg is a duplex signal,
+// yields another duplex signal whose value is the result of applying :forward
+// to the value of :arg. Writing to the resulting signal applies :reverse and
+// writes the result to :arg.
+// Similar to apply(ctx, f, arg), this is eager and caches the forward result.
+
+namespace detail {
+
+template<class Value>
+struct duplex_apply_data
+{
+    apply_result_data<Value> result;
+    captured_id input_id;
+};
+
+template<class Value, class Input, class Reverse>
+struct duplex_apply_signal : signal<
+                                 duplex_apply_signal<Value, Input, Reverse>,
+                                 Value,
+                                 movable_duplex_signal>
+{
+    duplex_apply_signal(
+        duplex_apply_data<Value>& data, Input input, Reverse reverse)
+        : data_(&data), input_(std::move(input)), reverse_(std::move(reverse))
+    {
+    }
+    id_interface const&
+    value_id() const
+    {
+        id_ = make_id(data_->result.version);
+        return id_;
+    }
+    bool
+    has_value() const
+    {
+        return data_->result.status == apply_status::READY
+               || data_->result.status == apply_status::MOVED;
+    }
+    Value const&
+    read() const
+    {
+        return data_->result.value;
+    }
+    Value
+    move_out() const
+    {
+        auto moved_out = std::move(data_->result.value);
+        data_->result.status = apply_status::MOVED;
+        return moved_out;
+    }
+    Value&
+    destructive_ref() const
+    {
+        data_->result.status = apply_status::MOVED;
+        return data_->result.value;
+    }
+    bool
+    ready_to_write() const
+    {
+        return input_.ready_to_write();
+    }
+    id_interface const&
+    write(Value value) const
+    {
+        id_interface const& new_value_id = input_.write(reverse_(value));
+        // If we stop here, then on the next refresh, we're going to detect
+        // that the input signal has changed (to what we just set it to), and
+        // then apply the forward mapping to convert that value back to the one
+        // we just received, which is obviously wasted effort. To avoid this,
+        // we need to just record the new value as our ouput and record the
+        // input's new value ID to go along with it. (This is only possible
+        // though if the input signal actually supplies its new value ID.)
+        if (new_value_id != null_id)
+        {
+            data_->input_id.capture(new_value_id);
+            ++data_->result.version;
+            data_->result.value = std::move(value);
+            data_->result.status = apply_status::READY;
+            return this->value_id();
+        }
+        else
+        {
+            return null_id;
+        }
+    }
+
+ private:
+    duplex_apply_data<Value>* data_;
+    mutable simple_id<counter_type> id_;
+    Input input_;
+    Reverse reverse_;
+};
+template<class Value, class Input, class Reverse>
+auto
+make_duplex_apply_signal(
+    duplex_apply_data<Value>& data, Input input, Reverse reverse)
+{
+    return duplex_apply_signal<Value, Input, Reverse>(
+        data, std::move(input), std::move(reverse));
+}
+
+} // namespace detail
+
+template<class Forward, class Reverse, class Arg>
+auto
+duplex_apply(context ctx, Forward&& forward, Reverse reverse, Arg arg)
+{
+    detail::duplex_apply_data<decltype(forward(forward_signal(arg)))>*
+        data_ptr;
+    get_cached_data(ctx, &data_ptr);
+    auto& data = *data_ptr;
+    bool args_ready = true;
+    process_apply_arg(ctx, data.result, args_ready, data.input_id, arg);
+    process_apply_body(
+        ctx, data.result, args_ready, std::forward<Forward>(forward), arg);
+    return detail::make_duplex_apply_signal(
+        data, std::move(arg), std::move(reverse));
+}
+
+// alia_mem_fn(m) wraps a member function name in a lambda so that it can be
+// passed as a function object. (It's the equivalent of std::mem_fn, but
+// there's no need to provide the type name.)
+#define ALIA_MEM_FN(m)                                                        \
+    [](auto&& x, auto&&... args) {                                            \
+        return x.m(std::forward<decltype(args)>(args)...);                    \
+    }
+#ifndef ALIA_STRICT_MACROS
+#define alia_mem_fn(m) ALIA_MEM_FN(m)
+#endif
+
+} // namespace alia
+
+
+// This file defines the operators for signals.
+
+namespace alia {
+
+#define ALIA_DEFINE_BINARY_SIGNAL_OPERATOR(op)                                \
+    template<                                                                 \
+        class A,                                                              \
+        class B,                                                              \
+        std::enable_if_t<                                                     \
+            is_signal_type<A>::value && is_signal_type<B>::value,             \
+            int> = 0>                                                         \
+    auto operator op(A const& a, B const& b)                                  \
+    {                                                                         \
+        return lazy_apply([](auto a, auto b) { return a op b; }, a, b);       \
+    }
+
+ALIA_DEFINE_BINARY_SIGNAL_OPERATOR(+)
+ALIA_DEFINE_BINARY_SIGNAL_OPERATOR(-)
+ALIA_DEFINE_BINARY_SIGNAL_OPERATOR(*)
+ALIA_DEFINE_BINARY_SIGNAL_OPERATOR(/)
+ALIA_DEFINE_BINARY_SIGNAL_OPERATOR(^)
+ALIA_DEFINE_BINARY_SIGNAL_OPERATOR(%)
+ALIA_DEFINE_BINARY_SIGNAL_OPERATOR(&)
+ALIA_DEFINE_BINARY_SIGNAL_OPERATOR(|)
+ALIA_DEFINE_BINARY_SIGNAL_OPERATOR(<<)
+ALIA_DEFINE_BINARY_SIGNAL_OPERATOR(>>)
+ALIA_DEFINE_BINARY_SIGNAL_OPERATOR(==)
+ALIA_DEFINE_BINARY_SIGNAL_OPERATOR(!=)
+ALIA_DEFINE_BINARY_SIGNAL_OPERATOR(<)
+ALIA_DEFINE_BINARY_SIGNAL_OPERATOR(<=)
+ALIA_DEFINE_BINARY_SIGNAL_OPERATOR(>)
+ALIA_DEFINE_BINARY_SIGNAL_OPERATOR(>=)
+
+#undef ALIA_DEFINE_BINARY_SIGNAL_OPERATOR
+
+#define ALIA_DEFINE_LIBERAL_BINARY_SIGNAL_OPERATOR(op)                        \
+    template<                                                                 \
+        class A,                                                              \
+        class B,                                                              \
+        std::enable_if_t<                                                     \
+            is_signal_type<A>::value && !is_signal_type<B>::value,            \
+            int> = 0>                                                         \
+    auto operator op(A const& a, B const& b)                                  \
+    {                                                                         \
+        return lazy_apply(                                                    \
+            [](auto a, auto b) { return a op b; }, a, value(b));              \
+    }                                                                         \
+    template<                                                                 \
+        class A,                                                              \
+        class B,                                                              \
+        std::enable_if_t<                                                     \
+            !is_signal_type<A>::value && !is_action_type<A>::value            \
+                && is_signal_type<B>::value,                                  \
+            int> = 0>                                                         \
+    auto operator op(A const& a, B const& b)                                  \
+    {                                                                         \
+        return lazy_apply(                                                    \
+            [](auto a, auto b) { return a op b; }, value(a), b);              \
+    }
+
+ALIA_DEFINE_LIBERAL_BINARY_SIGNAL_OPERATOR(+)
+ALIA_DEFINE_LIBERAL_BINARY_SIGNAL_OPERATOR(-)
+ALIA_DEFINE_LIBERAL_BINARY_SIGNAL_OPERATOR(*)
+ALIA_DEFINE_LIBERAL_BINARY_SIGNAL_OPERATOR(/)
+ALIA_DEFINE_LIBERAL_BINARY_SIGNAL_OPERATOR(^)
+ALIA_DEFINE_LIBERAL_BINARY_SIGNAL_OPERATOR(%)
+ALIA_DEFINE_LIBERAL_BINARY_SIGNAL_OPERATOR(&)
+ALIA_DEFINE_LIBERAL_BINARY_SIGNAL_OPERATOR(|)
+ALIA_DEFINE_LIBERAL_BINARY_SIGNAL_OPERATOR(<<)
+ALIA_DEFINE_LIBERAL_BINARY_SIGNAL_OPERATOR(>>)
+ALIA_DEFINE_LIBERAL_BINARY_SIGNAL_OPERATOR(==)
+ALIA_DEFINE_LIBERAL_BINARY_SIGNAL_OPERATOR(!=)
+ALIA_DEFINE_LIBERAL_BINARY_SIGNAL_OPERATOR(<)
+ALIA_DEFINE_LIBERAL_BINARY_SIGNAL_OPERATOR(<=)
+ALIA_DEFINE_LIBERAL_BINARY_SIGNAL_OPERATOR(>)
+ALIA_DEFINE_LIBERAL_BINARY_SIGNAL_OPERATOR(>=)
+
+#define ALIA_DEFINE_UNARY_SIGNAL_OPERATOR(op)                                 \
+    template<class A, std::enable_if_t<is_signal_type<A>::value, int> = 0>    \
+    auto operator op(A const& a)                                              \
+    {                                                                         \
+        return lazy_apply([](auto a) { return op a; }, a);                    \
+    }
+
+ALIA_DEFINE_UNARY_SIGNAL_OPERATOR(-)
+ALIA_DEFINE_UNARY_SIGNAL_OPERATOR(!)
+ALIA_DEFINE_UNARY_SIGNAL_OPERATOR(*)
+
+#undef ALIA_DEFINE_UNARY_SIGNAL_OPERATOR
+
+// For most compound assignment operators (e.g., +=), a += b, where :a and
+// :b are signals, creates an action that sets :a equal to :a + :b.
+
+#define ALIA_DEFINE_COMPOUND_ASSIGNMENT_OPERATOR(                             \
+    assignment_form, normal_form)                                             \
+    template<                                                                 \
+        class A,                                                              \
+        class B,                                                              \
+        std::enable_if_t<                                                     \
+            is_duplex_signal_type<A>::value                                   \
+                && is_readable_signal_type<B>::value,                         \
+            int> = 0>                                                         \
+    auto operator assignment_form(A const& a, B const& b)                     \
+    {                                                                         \
+        return a <<= (a normal_form b);                                       \
+    }
+
+ALIA_DEFINE_COMPOUND_ASSIGNMENT_OPERATOR(+=, +)
+ALIA_DEFINE_COMPOUND_ASSIGNMENT_OPERATOR(-=, -)
+ALIA_DEFINE_COMPOUND_ASSIGNMENT_OPERATOR(*=, *)
+ALIA_DEFINE_COMPOUND_ASSIGNMENT_OPERATOR(/=, /)
+ALIA_DEFINE_COMPOUND_ASSIGNMENT_OPERATOR(^=, ^)
+ALIA_DEFINE_COMPOUND_ASSIGNMENT_OPERATOR(%=, %)
+ALIA_DEFINE_COMPOUND_ASSIGNMENT_OPERATOR(&=, &)
+ALIA_DEFINE_COMPOUND_ASSIGNMENT_OPERATOR(|=, |)
+
+#undef ALIA_DEFINE_COMPOUND_ASSIGNMENT_OPERATOR
+
+#define ALIA_DEFINE_LIBERAL_COMPOUND_ASSIGNMENT_OPERATOR(                     \
+    assignment_form, normal_form)                                             \
+    template<                                                                 \
+        class A,                                                              \
+        class B,                                                              \
+        std::enable_if_t<                                                     \
+            is_duplex_signal_type<A>::value && !is_signal_type<B>::value,     \
+            int> = 0>                                                         \
+    auto operator assignment_form(A const& a, B const& b)                     \
+    {                                                                         \
+        return a <<= (a normal_form value(b));                                \
+    }
+
+ALIA_DEFINE_LIBERAL_COMPOUND_ASSIGNMENT_OPERATOR(+=, +)
+ALIA_DEFINE_LIBERAL_COMPOUND_ASSIGNMENT_OPERATOR(-=, -)
+ALIA_DEFINE_LIBERAL_COMPOUND_ASSIGNMENT_OPERATOR(*=, *)
+ALIA_DEFINE_LIBERAL_COMPOUND_ASSIGNMENT_OPERATOR(/=, /)
+ALIA_DEFINE_LIBERAL_COMPOUND_ASSIGNMENT_OPERATOR(^=, ^)
+ALIA_DEFINE_LIBERAL_COMPOUND_ASSIGNMENT_OPERATOR(%=, %)
+ALIA_DEFINE_LIBERAL_COMPOUND_ASSIGNMENT_OPERATOR(&=, &)
+ALIA_DEFINE_LIBERAL_COMPOUND_ASSIGNMENT_OPERATOR(|=, |)
+
+// The increment and decrement operators work similarly.
+
+#define ALIA_DEFINE_BY_ONE_OPERATOR(assignment_form, normal_form)             \
+    template<                                                                 \
+        class A,                                                              \
+        std::enable_if_t<is_duplex_signal_type<A>::value, int> = 0>           \
+    auto operator assignment_form(A const& a)                                 \
+    {                                                                         \
+        return a <<= (a normal_form value(typename A::value_type(1)));        \
+    }                                                                         \
+    template<                                                                 \
+        class A,                                                              \
+        std::enable_if_t<is_duplex_signal_type<A>::value, int> = 0>           \
+    auto operator assignment_form(A const& a, int)                            \
+    {                                                                         \
+        return a <<= (a normal_form value(typename A::value_type(1)));        \
+    }
+
+ALIA_DEFINE_BY_ONE_OPERATOR(++, +)
+ALIA_DEFINE_BY_ONE_OPERATOR(--, -)
+
+#undef ALIA_DEFINE_BY_ONE_OPERATOR
+
+// The || and && operators require special implementations because they don't
+// necessarily need to evaluate both of their arguments...
+
+template<class Arg0, class Arg1>
+struct logical_or_signal
+    : signal<logical_or_signal<Arg0, Arg1>, bool, read_only_signal>
+{
+    logical_or_signal(Arg0 const& arg0, Arg1 const& arg1)
+        : arg0_(arg0), arg1_(arg1)
+    {
+    }
+    id_interface const&
+    value_id() const override
+    {
+        id_ = combine_ids(ref(arg0_.value_id()), ref(arg1_.value_id()));
+        return id_;
+    }
+    bool
+    has_value() const override
+    {
+        // Obviously, this has a value if both of its arguments have values.
+        // However, we can also determine a value if only one input has a value
+        // but that value is true.
+        return (arg0_.has_value() && arg1_.has_value())
+               || (arg0_.has_value() && arg0_.read())
+               || (arg1_.has_value() && arg1_.read());
+    }
+    bool const&
+    read() const override
+    {
+        value_ = (arg0_.has_value() && arg0_.read())
+                 || (arg1_.has_value() && arg1_.read());
+        return value_;
+    }
+
+ private:
+    Arg0 arg0_;
+    Arg1 arg1_;
+    mutable id_pair<id_ref, id_ref> id_;
+    mutable bool value_;
+};
+template<
+    class A,
+    class B,
+    std::enable_if_t<
+        is_signal_type<A>::value && is_signal_type<B>::value,
+        int> = 0>
+auto
+operator||(A const& a, B const& b)
+{
+    return logical_or_signal<A, B>(a, b);
+}
+
+template<
+    class A,
+    class B,
+    std::enable_if_t<
+        is_signal_type<A>::value && !is_signal_type<B>::value,
+        int> = 0>
+auto
+operator||(A const& a, B const& b)
+{
+    return a || value(b);
+}
+template<
+    class A,
+    class B,
+    std::enable_if_t<
+        !is_signal_type<A>::value && is_signal_type<B>::value,
+        int> = 0>
+auto
+operator||(A const& a, B const& b)
+{
+    return value(a) || b;
+}
+
+template<class Arg0, class Arg1>
+struct logical_and_signal
+    : signal<logical_and_signal<Arg0, Arg1>, bool, read_only_signal>
+{
+    logical_and_signal(Arg0 const& arg0, Arg1 const& arg1)
+        : arg0_(arg0), arg1_(arg1)
+    {
+    }
+    id_interface const&
+    value_id() const override
+    {
+        id_ = combine_ids(ref(arg0_.value_id()), ref(arg1_.value_id()));
+        return id_;
+    }
+    bool
+    has_value() const override
+    {
+        // Obviously, this has a value if both of its arguments have values.
+        // However, we can also determine a value if only one input has a value
+        // but that value is false.
+        return (arg0_.has_value() && arg1_.has_value())
+               || (arg0_.has_value() && !arg0_.read())
+               || (arg1_.has_value() && !arg1_.read());
+    }
+    bool const&
+    read() const override
+    {
+        value_
+            = !((arg0_.has_value() && !arg0_.read())
+                || (arg1_.has_value() && !arg1_.read()));
+        return value_;
+    }
+
+ private:
+    Arg0 arg0_;
+    Arg1 arg1_;
+    mutable id_pair<id_ref, id_ref> id_;
+    mutable bool value_;
+};
+template<
+    class A,
+    class B,
+    std::enable_if_t<
+        is_signal_type<A>::value && is_signal_type<B>::value,
+        int> = 0>
+auto
+operator&&(A const& a, B const& b)
+{
+    return logical_and_signal<A, B>(a, b);
+}
+
+template<
+    class A,
+    class B,
+    std::enable_if_t<
+        is_signal_type<A>::value && !is_signal_type<B>::value,
+        int> = 0>
+auto
+operator&&(A const& a, B const& b)
+{
+    return a && value(b);
+}
+template<
+    class A,
+    class B,
+    std::enable_if_t<
+        !is_signal_type<A>::value && is_signal_type<B>::value,
+        int> = 0>
+auto
+operator&&(A const& a, B const& b)
+{
+    return value(a) && b;
+}
+
+// This is the equivalent of the ternary operator (or std::conditional) for
+// signals.
+//
+// conditional(b, t, f), where :b, :t and :f are all signals, yields :t
+// if :b's value is true and :f if :b's value is false.
+//
+// :t and :f must have the same value type, and :b's value type must be
+// testable in a boolean context.
+//
+// Note that this is a normal function call, so, unlike an if statement or the
+// ternary operator, both :t and :f are fully evaluated. However, they are only
+// read if they're selected.
+//
+template<class Condition, class T, class F>
+struct signal_mux : signal<
+                        signal_mux<Condition, T, F>,
+                        typename T::value_type,
+                        typename signal_capabilities_intersection<
+                            typename T::capabilities,
+                            typename F::capabilities>::type>
+{
+    signal_mux(Condition condition, T t, F f)
+        : condition_(condition), t_(t), f_(f)
+    {
+    }
+    bool
+    has_value() const override
+    {
+        return condition_.has_value()
+               && (condition_.read() ? t_.has_value() : f_.has_value());
+    }
+    typename T::value_type const&
+    read() const override
+    {
+        return condition_.read() ? t_.read() : f_.read();
+    }
+    typename T::value_type
+    move_out() const override
+    {
+        return condition_.read() ? t_.move_out() : f_.move_out();
+    }
+    typename T::value_type&
+    destructive_ref() const override
+    {
+        return condition_.read() ? t_.destructive_ref() : f_.destructive_ref();
+    }
+    id_interface const&
+    value_id() const override
+    {
+        if (!condition_.has_value())
+            return null_id;
+        id_ = combine_ids(
+            make_id(condition_.read() ? true : false),
+            condition_.read() ? ref(t_.value_id()) : ref(f_.value_id()));
+        return id_;
+    }
+    bool
+    ready_to_write() const override
+    {
+        return condition_.has_value()
+               && (condition_.read() ? t_.ready_to_write()
+                                     : f_.ready_to_write());
+    }
+    id_interface const&
+    write(typename T::value_type value) const override
+    {
+        if (condition_.read())
+            t_.write(value);
+        else
+            f_.write(value);
+        return null_id;
+    }
+    void
+    clear() const override
+    {
+        if (condition_.read())
+            t_.clear();
+        else
+            f_.clear();
+    }
+    bool
+    invalidate(std::exception_ptr error) const override
+    {
+        if (condition_.read())
+            return t_.invalidate(error);
+        else
+            return f_.invalidate(error);
+    }
+    bool
+    is_invalidated() const override
+    {
+        if (condition_.read())
+            return t_.is_invalidated();
+        else
+            return f_.is_invalidated();
+    }
+
+ private:
+    Condition condition_;
+    T t_;
+    F f_;
+    mutable id_pair<simple_id<bool>, id_ref> id_;
+};
+template<class Condition, class T, class F>
+signal_mux<Condition, T, F>
+make_signal_mux(Condition condition, T t, F f)
+{
+    return signal_mux<Condition, T, F>(condition, t, f);
+}
+
+template<class Condition, class T, class F>
+auto
+conditional(Condition condition, T t, F f)
+{
+    return make_signal_mux(signalize(condition), signalize(t), signalize(f));
+}
+
+// Given a signal to a structure, signal->*field_ptr returns a signal to the
+// specified field within the structure.
+template<class StructureSignal, class Field>
+struct field_signal : preferred_id_signal<
+                          field_signal<StructureSignal, Field>,
+                          Field,
+                          typename signal_capabilities_intersection<
+                              typename StructureSignal::capabilities,
+                              movable_duplex_signal>::type,
+                          id_pair<id_ref, simple_id<Field*>>>
+{
+    typedef typename StructureSignal::value_type structure_type;
+    typedef Field structure_type::*field_ptr;
+    field_signal(StructureSignal structure, field_ptr field)
+        : structure_(std::move(structure)), field_(std::move(field))
+    {
+    }
+    bool
+    has_value() const override
+    {
+        return structure_.has_value();
+    }
+    Field const&
+    read() const override
+    {
+        structure_type const& structure = structure_.read();
+        return structure.*field_;
+    }
+    Field
+    move_out() const override
+    {
+        structure_type& structure = structure_.destructive_ref();
+        Field field = std::move(structure.*field_);
+        return field;
+    }
+    Field&
+    destructive_ref() const override
+    {
+        structure_type& structure = structure_.destructive_ref();
+        return structure.*field_;
+    }
+    auto
+    complex_value_id() const
+    {
+        return combine_ids(
+            ref(structure_.value_id()),
+            // Apparently pointers-to-members aren't comparable for order,
+            // which means they don't meet the requirements for serving as an
+            // alia ID, so instead we use the address of the field if it were
+            // in a structure that started at address 0.
+            make_id(&(((structure_type*) 0)->*field_)));
+    }
+    bool
+    ready_to_write() const override
+    {
+        return structure_.has_value() && structure_.ready_to_write();
+    }
+    id_interface const&
+    write(Field x) const override
+    {
+        structure_type s = forward_signal(alia::move(structure_));
+        s.*field_ = std::move(x);
+        structure_.write(std::move(s));
+        return null_id;
+    }
+
+ private:
+    StructureSignal structure_;
+    field_ptr field_;
+};
+template<class StructureSignal, class Field>
+std::enable_if_t<
+    is_signal_type<StructureSignal>::value,
+    field_signal<StructureSignal, Field>>
+operator->*(
+    StructureSignal const& structure,
+    Field StructureSignal::value_type::*field)
+{
+    return field_signal<StructureSignal, Field>(structure, field);
+}
+
+// ALIA_FIELD(x, f) is equivalent to x->*T::f where T is the value type of x.
+#define ALIA_FIELD(x, f) ((x)->*&std::decay<decltype(read_signal(x))>::type::f)
+#ifndef ALIA_STRICT_MACROS
+#define alia_field(x, f) ALIA_FIELD(x, f)
+#endif
+
+// has_value_type<T>::value yields a compile-time boolean indicating whether or
+// not T has a value_type member (which is the case for standard containers).
+template<class T, class = std::void_t<>>
+struct has_value_type : std::false_type
+{
+};
+template<class T>
+struct has_value_type<T, std::void_t<typename T::value_type>> : std::true_type
+{
+};
+
+// has_mapped_type<T>::value yields a compile-time boolean indicating whether
+// or not T has a mapped_type member (which is the case for standard
+// associative containers, or at least the ones that aren't sets).
+template<class T, class = std::void_t<>>
+struct has_mapped_type : std::false_type
+{
+};
+template<class T>
+struct has_mapped_type<T, std::void_t<typename T::mapped_type>>
+    : std::true_type
+{
+};
+
+// subscript_result_type<Container, Index>::type gives the expected type of the
+// value that results from invoking the subscript operator on a Container.
+// (This is necessary to deal with containers that return proxies.)
+//
+// The logic is as follows:
+// 1 - If the container has a mapped_type field, use that.
+// 2 - Otherwise, if the container has a value_type field, use that.
+// 3 - Otherwise, just see what operator[] returns.
+//
+template<class Container, class Index, class = void>
+struct subscript_result_type
+{
+};
+template<class Container, class Index>
+struct subscript_result_type<
+    Container,
+    Index,
+    std::enable_if_t<has_mapped_type<Container>::value>>
+{
+    typedef typename Container::mapped_type type;
+};
+template<class Container, class Index>
+struct subscript_result_type<
+    Container,
+    Index,
+    std::enable_if_t<
+        !has_mapped_type<Container>::value
+        && has_value_type<Container>::value>>
+{
+    typedef typename Container::value_type type;
+};
+template<class Container, class Index>
+struct subscript_result_type<
+    Container,
+    Index,
+    std::enable_if_t<
+        !has_mapped_type<Container>::value
+        && !has_value_type<Container>::value>>
+{
+    typedef std::decay_t<decltype(
+        std::declval<Container>()[std::declval<Index>()])>
+        type;
+};
+
+// subscript_returns_reference<Container,Index>::value yields a
+// compile-time boolean indicating whether or not the subscript operator
+// for a type returns by reference (vs by value).
+template<class Container, class Index>
+struct subscript_returns_reference
+    : std::is_reference<decltype(
+          std::declval<Container>()[std::declval<Index>()])>
+{
+};
+
+// has_at_indexer<Container, Index>::value yields a compile-time boolean
+// indicating whether or not Container has an 'at' member function that takes
+// an Index.
+template<class Container, class Index, class = std::void_t<>>
+struct has_at_indexer : std::false_type
+{
+};
+template<class Container, class Index>
+struct has_at_indexer<
+    Container,
+    Index,
+    std::void_t<decltype(std::declval<Container const&>().at(
+        std::declval<Index>()))>> : std::true_type
+{
+};
+
+template<class Container, class Index>
+auto
+invoke_const_subscript(
+    Container const& container,
+    Index const& index,
+    std::enable_if_t<!has_at_indexer<Container, Index>::value>* = 0)
+    -> decltype(container[index])
+{
+    return container[index];
+}
+
+template<class Container, class Index>
+auto
+invoke_const_subscript(
+    Container const& container,
+    Index const& index,
+    std::enable_if_t<has_at_indexer<Container, Index>::value>* = 0)
+    -> decltype(container.at(index))
+{
+    return container.at(index);
+}
+
+// const_subscript_returns_reference<Container,Index>::value yields a
+// compile-time boolean indicating whether or not invoke_const_subscript
+// returns by reference (vs by value).
+template<class Container, class Index>
+struct const_subscript_returns_reference
+    : std::is_reference<decltype(invoke_const_subscript(
+          std::declval<Container>(), std::declval<Index>()))>
+{
+};
+
+template<class Container, class Index, class = void>
+struct const_subscript_invoker
+{
+};
+
+template<class Container, class Index>
+struct const_subscript_invoker<
+    Container,
+    Index,
+    std::enable_if_t<
+        const_subscript_returns_reference<Container, Index>::value>>
+{
+    auto const&
+    operator()(Container const& container, Index const& index) const
+    {
+        return invoke_const_subscript(container, index);
+    }
+};
+
+template<class Container, class Index>
+struct const_subscript_invoker<
+    Container,
+    Index,
+    std::enable_if_t<
+        !const_subscript_returns_reference<Container, Index>::value>>
+{
+    auto const&
+    operator()(Container const& container, Index const& index) const
+    {
+        storage_ = invoke_const_subscript(container, index);
+        return storage_;
+    }
+
+ private:
+    mutable typename subscript_result_type<Container, Index>::type storage_;
+};
+
+template<class ContainerSignal, class IndexSignal, class Value>
+std::enable_if_t<signal_is_writable<ContainerSignal>::value>
+write_subscript(
+    ContainerSignal const& container, IndexSignal const& index, Value value)
+{
+    auto new_container = forward_signal(alia::move(container));
+    new_container[index.read()] = std::move(value);
+    container.write(std::move(new_container));
+}
+
+template<class ContainerSignal, class IndexSignal, class Value>
+std::enable_if_t<!signal_is_writable<ContainerSignal>::value>
+write_subscript(ContainerSignal const&, IndexSignal const&, Value)
+{
+}
+
+template<class ContainerSignal, class IndexSignal>
+struct subscript_signal
+    : preferred_id_signal<
+          subscript_signal<ContainerSignal, IndexSignal>,
+          typename subscript_result_type<
+              typename ContainerSignal::value_type,
+              typename IndexSignal::value_type>::type,
+          typename signal_capabilities_intersection<
+              typename ContainerSignal::capabilities,
+              typename std::conditional<
+                  subscript_returns_reference<
+                      typename ContainerSignal::value_type,
+                      typename IndexSignal::value_type>::value,
+                  movable_duplex_signal,
+                  move_activated_duplex_signal>::type>::type,
+          id_pair<alia::id_ref, alia::id_ref>>
+{
+    subscript_signal()
+    {
+    }
+    subscript_signal(ContainerSignal array, IndexSignal index)
+        : container_(std::move(array)), index_(std::move(index))
+    {
+    }
+    bool
+    has_value() const override
+    {
+        return container_.has_value() && index_.has_value();
+    }
+    typename subscript_signal::value_type const&
+    read() const override
+    {
+        return invoker_(container_.read(), index_.read());
+    }
+    typename subscript_signal::value_type
+    move_out() const override
+    {
+        auto& container = container_.destructive_ref();
+        typename subscript_signal::value_type moved_out
+            = std::move(container[index_.read()]);
+        return moved_out;
+    }
+    typename subscript_signal::value_type&
+    destructive_ref() const override
+    {
+        if constexpr (subscript_returns_reference<
+                          typename ContainerSignal::value_type,
+                          typename IndexSignal::value_type>::value)
+        {
+            auto& container = container_.destructive_ref();
+            return container[index_.read()];
+        }
+        else
+        {
+            // The signal capabilities system should prevent us from ever
+            // getting here.
+            // LCOV_EXCL_START
+            throw nullptr;
+            // LCOV_EXCL_STOP
+        }
+    }
+    auto
+    complex_value_id() const
+    {
+        return combine_ids(ref(container_.value_id()), ref(index_.value_id()));
+    }
+    bool
+    ready_to_write() const override
+    {
+        return container_.has_value() && index_.has_value()
+               && container_.ready_to_write();
+    }
+    id_interface const&
+    write(typename subscript_signal::value_type x) const override
+    {
+        write_subscript(container_, index_, std::move(x));
+        return null_id;
+    }
+
+ private:
+    ContainerSignal container_;
+    IndexSignal index_;
+    const_subscript_invoker<
+        typename ContainerSignal::value_type,
+        typename IndexSignal::value_type>
+        invoker_;
+};
+template<class ContainerSignal, class IndexSignal>
+subscript_signal<ContainerSignal, IndexSignal>
+make_subscript_signal(ContainerSignal container, IndexSignal index)
+{
+    return subscript_signal<ContainerSignal, IndexSignal>(
+        std::move(container), std::move(index));
+}
+
+template<class Derived, class Value, class Capabilities>
+template<class Index>
+auto
+signal_base<Derived, Value, Capabilities>::operator[](Index index) const
+{
+    return make_subscript_signal(
+        static_cast<Derived const&>(*this), signalize(std::move(index)));
+}
+
+} // namespace alia
+
+
+namespace alia {
+
+// is_map_like<Container>::value yields a compile-time boolean indicating
+// whether or not Container behaves like a map for the purposes of alia
+// iteration and indexing. (This is determined by checking whether or not
+// Container has both a key_type and a mapped_type member.)
+template<class T, class = std::void_t<>>
+struct is_map_like : std::false_type
+{
+};
+template<class T>
+struct is_map_like<
+    T,
+    std::void_t<typename T::key_type, typename T::mapped_type>>
+    : std::true_type
+{
+};
+
+// is_vector_like<Container>::value yields a compile-time boolean indicating
+// whether or not Container behaves like a vector for the purposes of alia
+// iteration and indexing. (This is determined by checking whether or not
+// Container can be subscripted with a size_t. This is sufficient because the
+// main purpose is to distinguish vector-like containers from list-like ones.)
+template<class Container, class = std::void_t<>>
+struct is_vector_like : std::false_type
+{
+};
+template<class Container>
+struct is_vector_like<
+    Container,
+    std::void_t<
+        typename Container::value_type,
+        typename Container::size_type,
+        decltype(std::declval<Container>().at(size_t(0)))>> : std::true_type
+{
+};
+
+template<class Item>
+auto
+get_alia_item_id(Item const&)
+{
+    return null_id;
+}
+
+// invoke_map_iteration_body selects the appropriate way to invoke the
+// iteration body function provided to for_each (for map-like containers).
+template<
+    class IterationBody,
+    class NamedBlockBegin,
+    class Key,
+    class Value,
+    std::enable_if_t<
+        std::is_invocable<IterationBody&&, naming_context&, Key&&, Value&&>::
+            value,
+        int> = 0>
+void
+invoke_map_iteration_body(
+    IterationBody&& body,
+    naming_context& nc,
+    NamedBlockBegin&&,
+    Key&& key,
+    Value&& value)
+{
+    body(nc, key, value);
+}
+template<
+    class IterationBody,
+    class NamedBlockBegin,
+    class Key,
+    class Value,
+    std::enable_if_t<
+        std::is_invocable<IterationBody&&, Key&&, Value&&>::value,
+        int> = 0>
+void
+invoke_map_iteration_body(
+    IterationBody&& body,
+    naming_context&,
+    NamedBlockBegin&& nb_begin,
+    Key&& key,
+    Value&& value)
+{
+    named_block nb;
+    nb_begin(nb);
+    body(key, value);
+}
+
+// for_each for map-like containers
+template<
+    class Context,
+    class ContainerSignal,
+    class Fn,
+    std::enable_if_t<
+        is_signal_type<ContainerSignal>::value
+            && is_map_like<typename ContainerSignal::value_type>::value,
+        int> = 0>
+void
+for_each(Context ctx, ContainerSignal const& container_signal, Fn&& fn)
+{
+    ALIA_IF(has_value(container_signal))
+    {
+        naming_context nc(ctx);
+        auto const& container = read_signal(container_signal);
+        for (auto const& item : container)
+        {
+            auto key = direct(item.first);
+            auto value = container_signal[key];
+            invoke_map_iteration_body(
+                fn,
+                nc,
+                [&](named_block& nb) { nb.begin(nc, make_id(item.first)); },
+                key,
+                value);
+        }
+    }
+    ALIA_END
+}
+
+// invoke_sequence_iteration_body selects the appropriate way to invoke the
+// iteration body function provided to for_each (for sequence containers).
+template<
+    class IterationBody,
+    class NamedBlockBegin,
+    class Item,
+    std::enable_if_t<
+        std::is_invocable<IterationBody&&, naming_context&, size_t, Item&&>::
+            value,
+        int> = 0>
+void
+invoke_sequence_iteration_body(
+    IterationBody&& body,
+    naming_context& nc,
+    NamedBlockBegin&&,
+    size_t index,
+    Item&& item)
+{
+    body(nc, index, item);
+}
+template<
+    class IterationBody,
+    class NamedBlockBegin,
+    class Item,
+    std::enable_if_t<
+        std::is_invocable<IterationBody&&, size_t, Item&&>::value,
+        int> = 0>
+void
+invoke_sequence_iteration_body(
+    IterationBody&& body,
+    naming_context&,
+    NamedBlockBegin&& nb_begin,
+    size_t index,
+    Item&& item)
+{
+    named_block nb;
+    nb_begin(nb);
+    body(index, item);
+}
+template<
+    class IterationBody,
+    class NamedBlockBegin,
+    class Item,
+    std::enable_if_t<
+        std::is_invocable<IterationBody&&, naming_context&, Item&&>::value,
+        int> = 0>
+void
+invoke_sequence_iteration_body(
+    IterationBody&& body,
+    naming_context& nc,
+    NamedBlockBegin&&,
+    size_t,
+    Item&& item)
+{
+    body(nc, item);
+}
+template<
+    class IterationBody,
+    class NamedBlockBegin,
+    class Item,
+    std::enable_if_t<
+        std::is_invocable<IterationBody&&, Item&&>::value,
+        int> = 0>
+void
+invoke_sequence_iteration_body(
+    IterationBody&& body,
+    naming_context&,
+    NamedBlockBegin&& nb_begin,
+    size_t,
+    Item&& item)
+{
+    named_block nb;
+    nb_begin(nb);
+    body(item);
+}
+
+// for_each for signals carrying vector-like containers
+template<
+    class Context,
+    class ContainerSignal,
+    class Fn,
+    std::enable_if_t<
+        is_signal_type<ContainerSignal>::value
+            && !is_map_like<typename ContainerSignal::value_type>::value
+            && is_vector_like<typename ContainerSignal::value_type>::value,
+        int> = 0>
+void
+for_each(Context ctx, ContainerSignal const& container_signal, Fn&& fn)
+{
+    ALIA_IF(has_value(container_signal))
+    {
+        naming_context nc(ctx);
+        auto const& container = read_signal(container_signal);
+        size_t const item_count = container.size();
+        for (size_t index = 0; index != item_count; ++index)
+        {
+            invoke_sequence_iteration_body(
+                fn,
+                nc,
+                [&](named_block& nb) {
+                    auto iteration_id = get_alia_item_id(container[index]);
+                    if (iteration_id != null_id)
+                        nb.begin(nc, iteration_id);
+                    else
+                        nb.begin(nc, make_id(index));
+                },
+                index,
+                container_signal[value(index)]);
+        }
+    }
+    ALIA_END
+}
+
+// for_each for vector-like containers of signals
+template<
+    class Context,
+    class Container,
+    class Fn,
+    std::enable_if_t<
+        !is_signal_type<
+            std::remove_cv_t<std::remove_reference_t<Container>>>::value
+            && !is_map_like<
+                std::remove_cv_t<std::remove_reference_t<Container>>>::value
+            && is_vector_like<
+                std::remove_cv_t<std::remove_reference_t<Container>>>::value
+            && is_signal_type<typename std::remove_cv_t<
+                std::remove_reference_t<Container>>::value_type>::value,
+        int> = 0>
+void
+for_each(Context ctx, Container&& container, Fn&& fn)
+{
+    naming_context nc(ctx);
+    size_t index = 0;
+    for (auto&& item : container)
+    {
+        invoke_sequence_iteration_body(
+            fn,
+            nc,
+            [&](named_block& nb) {
+                // We don't try to use get_alia_item_id() here because we want
+                // to support the use case where the UI is present even when
+                // the item isn't available, and we want to keep the block ID
+                // stable in that scenario.
+                nb.begin(nc, make_id(index));
+            },
+            index,
+            item);
+        ++index;
+    }
+}
+
+// for_each for vector-like containers of raw values
+template<
+    class Context,
+    class Container,
+    class Fn,
+    std::enable_if_t<
+        !is_signal_type<
+            std::remove_cv_t<std::remove_reference_t<Container>>>::value
+            && !is_map_like<
+                std::remove_cv_t<std::remove_reference_t<Container>>>::value
+            && is_vector_like<
+                std::remove_cv_t<std::remove_reference_t<Container>>>::value
+            && !is_signal_type<typename std::remove_cv_t<
+                std::remove_reference_t<Container>>::value_type>::value,
+        int> = 0>
+void
+for_each(Context ctx, Container&& container, Fn&& fn)
+{
+    naming_context nc(ctx);
+    size_t index = 0;
+    for (auto&& item : container)
+    {
+        invoke_sequence_iteration_body(
+            fn,
+            nc,
+            [&](named_block& nb) {
+                auto iteration_id = get_alia_item_id(item);
+                if (iteration_id != null_id)
+                    nb.begin(nc, iteration_id);
+                else
+                    nb.begin(nc, make_id(index));
+            },
+            index,
+            item);
+        ++index;
+    }
+}
+
+// signal type for accessing items within a list
+template<class ListSignal, class Item>
+struct list_item_signal : signal<
+                              list_item_signal<ListSignal, Item>,
+                              Item,
+                              typename ListSignal::capabilities>
+{
+    list_item_signal(ListSignal const& list_signal, size_t index, Item* item)
+        : list_signal_(list_signal), index_(index), item_(item)
+    {
+    }
+    id_interface const&
+    value_id() const
+    {
+        id_ = combine_ids(ref(list_signal_.value_id()), make_id(index_));
+        return id_;
+    }
+    bool
+    has_value() const
+    {
+        return list_signal_.has_value();
+    }
+    Item const&
+    read() const
+    {
+        return *item_;
+    }
+    Item
+    move_out() const
+    {
+        return *item_;
+    }
+    Item&
+    destructive_ref() const
+    {
+        return *item_;
+    }
+    bool
+    ready_to_write() const
+    {
+        return list_signal_.ready_to_write();
+    }
+    id_interface const&
+    write(Item value) const
+    {
+        *item_ = std::move(value);
+        return null_id;
+    }
+
+ private:
+    ListSignal list_signal_;
+    size_t index_;
+    Item* item_;
+    mutable id_pair<id_ref, simple_id<size_t>> id_;
+};
+template<class ListSignal, class Item>
+list_item_signal<ListSignal, Item>
+make_list_item_signal(ListSignal const& signal, size_t index, Item const* item)
+{
+    return list_item_signal<ListSignal, Item>(
+        signal, index, const_cast<Item*>(item));
+}
+
+// for_each for list-like signal containers
+template<
+    class Context,
+    class ContainerSignal,
+    class Fn,
+    std::enable_if_t<
+        is_signal_type<ContainerSignal>::value
+            && !is_map_like<typename ContainerSignal::value_type>::value
+            && !is_vector_like<typename ContainerSignal::value_type>::value,
+        int> = 0>
+void
+for_each(Context ctx, ContainerSignal const& container_signal, Fn&& fn)
+{
+    ALIA_IF(has_value(container_signal))
+    {
+        naming_context nc(ctx);
+        auto const& container = read_signal(container_signal);
+        size_t index = 0;
+        for (auto const& item : container)
+        {
+            invoke_sequence_iteration_body(
+                fn,
+                nc,
+                [&](named_block& nb) {
+                    auto iteration_id = get_alia_item_id(item);
+                    if (iteration_id != null_id)
+                        nb.begin(nc, iteration_id);
+                    else
+                        nb.begin(nc, make_id(&item));
+                },
+                index,
+                make_list_item_signal(container_signal, index, &item));
+            ++index;
+        }
+    }
+    ALIA_END
+}
+
+// for_each for list-like containers of signals
+template<
+    class Context,
+    class Container,
+    class Fn,
+    std::enable_if_t<
+        !is_signal_type<
+            std::remove_cv_t<std::remove_reference_t<Container>>>::value
+            && !is_map_like<
+                std::remove_cv_t<std::remove_reference_t<Container>>>::value
+            && !is_vector_like<
+                std::remove_cv_t<std::remove_reference_t<Container>>>::value
+            && is_signal_type<typename std::remove_cv_t<
+                std::remove_reference_t<Container>>::value_type>::value,
+        int> = 0>
+void
+for_each(Context ctx, Container&& container, Fn&& fn)
+{
+    naming_context nc(ctx);
+    size_t index = 0;
+    for (auto&& item : container)
+    {
+        invoke_sequence_iteration_body(
+            fn,
+            nc,
+            [&](named_block& nb) {
+                // We don't try to use get_alia_item_id() here because we want
+                // to support the use case where the UI is present even when
+                // the item isn't available, and we want to keep the block ID
+                // stable in that scenario.
+                nb.begin(nc, make_id(&item));
+            },
+            index,
+            item);
+        ++index;
+    }
+}
+
+// for_each for list-like containers of raw values
+template<
+    class Context,
+    class Container,
+    class Fn,
+    std::enable_if_t<
+        !is_signal_type<
+            std::remove_cv_t<std::remove_reference_t<Container>>>::value
+            && !is_map_like<
+                std::remove_cv_t<std::remove_reference_t<Container>>>::value
+            && !is_vector_like<
+                std::remove_cv_t<std::remove_reference_t<Container>>>::value
+            && !is_signal_type<typename std::remove_cv_t<
+                std::remove_reference_t<Container>>::value_type>::value,
+        int> = 0>
+void
+for_each(Context ctx, Container&& container, Fn&& fn)
+{
+    naming_context nc(ctx);
+    size_t index = 0;
+    for (auto&& item : container)
+    {
+        invoke_sequence_iteration_body(
+            fn,
+            nc,
+            [&](named_block& nb) {
+                auto iteration_id = get_alia_item_id(item);
+                if (iteration_id != null_id)
+                    nb.begin(nc, iteration_id);
+                else
+                    nb.begin(nc, make_id(&item));
+            },
+            index,
+            item);
+        ++index;
+    }
+}
+
+} // namespace alia
+
+
+
+namespace alia {
+
+struct signal_validation_data
+{
+    captured_id value_id;
+    std::exception_ptr error;
+};
+
+template<class Wrapped>
+struct validated_signal : signal_wrapper<validated_signal<Wrapped>, Wrapped>
+{
+    validated_signal()
+    {
+    }
+    validated_signal(signal_validation_data* data, Wrapped wrapped)
+        : validated_signal::signal_wrapper(wrapped), data_(data)
+    {
+    }
+    bool
+    has_value() const override
+    {
+        return !data_->error && this->wrapped_.has_value();
+    }
+    bool
+    invalidate(std::exception_ptr error) const override
+    {
+        data_->error = error;
+        this->wrapped_.invalidate(error);
+        return true;
+    }
+    bool
+    is_invalidated() const override
+    {
+        return data_->error || this->wrapped_.is_invalidated();
+    }
+
+ private:
+    signal_validation_data* data_;
+};
+
+template<class Signal>
+auto
+enforce_validity(
+    dataless_context ctx, Signal signal, signal_validation_data& data)
+{
+    refresh_handler(ctx, [&](auto) {
+        if (!signal.is_invalidated()
+            && !data.value_id.matches(signal.value_id()))
+        {
+            data.error = nullptr;
+            data.value_id.capture(signal.value_id());
+        }
+    });
+    return validated_signal<Signal>(&data, signal);
+}
+
+template<class Signal>
+auto
+enforce_validity(context ctx, Signal signal)
+{
+    auto& data = get_cached_data<signal_validation_data>(ctx);
+    return enforce_validity(ctx, signal, data);
+}
+
+} // namespace alia
+
+
+
+// This file defines utilities for constructing custom signals via lambda
+// functions.
+
+namespace alia {
+
+// lambda_constant(read) creates a read-only signal whose value is constant and
+// is determined by calling :read.
+template<class Value, class Read>
+struct lambda_constant_signal
+    : signal<lambda_constant_signal<Value, Read>, Value, move_activated_signal>
+{
+    lambda_constant_signal(Read read) : read_(read)
+    {
+    }
+    bool
+    has_value() const override
+    {
+        return true;
+    }
+    id_interface const&
+    value_id() const override
+    {
+        return unit_id;
+    }
+    Value const&
+    read() const override
+    {
+        value_ = read_();
+        return value_;
+    }
+    Value
+    move_out() const override
+    {
+        return read_();
+    }
+    Value&
+    destructive_ref() const override
+    {
+        value_ = read_();
+        return value_;
+    }
+
+ private:
+    Read read_;
+    mutable decltype(read_()) value_;
+};
+template<class Read>
+auto
+lambda_constant(Read read)
+{
+    return lambda_constant_signal<std::decay_t<decltype(read())>, Read>(read);
+}
+
+// lambda_reader(read) creates a read-only signal whose value is determined by
+// calling :read.
+template<class Value, class Read>
+struct simple_lambda_reader_signal
+    : regular_signal<
+          simple_lambda_reader_signal<Value, Read>,
+          Value,
+          move_activated_signal>
+{
+    simple_lambda_reader_signal(Read read)
+        : read_(read), value_(decltype(read())())
+    {
+    }
+    bool
+    has_value() const override
+    {
+        return true;
+    }
+    Value const&
+    read() const override
+    {
+        value_ = read_();
+        return value_;
+    }
+    Value
+    move_out() const override
+    {
+        return read_();
+    }
+    Value&
+    destructive_ref() const override
+    {
+        value_ = read_();
+        return value_;
+    }
+
+ private:
+    Read read_;
+    mutable decltype(read_()) value_;
+};
+template<class Read>
+auto
+lambda_reader(Read read)
+{
+    return simple_lambda_reader_signal<std::decay_t<decltype(read())>, Read>(
+        read);
+}
+
+// lambda_reader(has_value, read) creates a read-only signal whose value is
+// determined by calling :has_value and :read.
+template<class Value, class HasValue, class Read>
+struct lambda_reader_signal : regular_signal<
+                                  lambda_reader_signal<Value, HasValue, Read>,
+                                  Value,
+                                  move_activated_signal>
+{
+    lambda_reader_signal(HasValue has_value, Read read)
+        : has_value_(has_value), read_(read), value_(decltype(read())())
+    {
+    }
+    bool
+    has_value() const override
+    {
+        return has_value_();
+    }
+    Value const&
+    read() const override
+    {
+        value_ = read_();
+        return value_;
+    }
+    Value
+    move_out() const override
+    {
+        return read_();
+    }
+    Value&
+    destructive_ref() const override
+    {
+        value_ = read_();
+        return value_;
+    }
+
+ private:
+    HasValue has_value_;
+    Read read_;
+    mutable decltype(read_()) value_;
+};
+template<class HasValue, class Read>
+auto
+lambda_reader(HasValue has_value, Read read)
+{
+    return lambda_reader_signal<
+        std::decay_t<decltype(read())>,
+        HasValue,
+        Read>(has_value, read);
+}
+
+// lambda_reader(has_value, read, generate_id) creates a read-only signal
+// whose value is determined by calling :has_value and :read and whose ID is
+// determined by calling :generate_id.
+template<class Value, class HasValue, class Read, class GenerateId>
+struct lambda_reader_signal_with_id
+    : signal<
+          lambda_reader_signal_with_id<Value, HasValue, Read, GenerateId>,
+          Value,
+          move_activated_signal>
+{
+    lambda_reader_signal_with_id(
+        HasValue has_value, Read read, GenerateId generate_id)
+        : has_value_(has_value),
+          read_(read),
+          value_(decltype(read())()),
+          generate_id_(generate_id)
+    {
+    }
+    id_interface const&
+    value_id() const override
+    {
+        id_ = generate_id_();
+        return id_;
+    }
+    bool
+    has_value() const override
+    {
+        return has_value_();
+    }
+    Value const&
+    read() const override
+    {
+        value_ = read_();
+        return value_;
+    }
+    Value
+    move_out() const override
+    {
+        return read_();
+    }
+    Value&
+    destructive_ref() const override
+    {
+        value_ = read_();
+        return value_;
+    }
+
+ private:
+    HasValue has_value_;
+    Read read_;
+    mutable decltype(read_()) value_;
+    GenerateId generate_id_;
+    mutable decltype(generate_id_()) id_;
+};
+template<class HasValue, class Read, class GenerateId>
+auto
+lambda_reader(HasValue has_value, Read read, GenerateId generate_id)
+{
+    return lambda_reader_signal_with_id<
+        std::decay_t<decltype(read())>,
+        HasValue,
+        Read,
+        GenerateId>(has_value, read, generate_id);
+}
+
+// lambda_duplex(has_value, read, ready_to_write, write) creates a duplex
+// signal whose value is read by calling :has_value and :read and written by
+// calling :ready_to_write and :write.
+template<
+    class Value,
+    class HasValue,
+    class Read,
+    class ReadyToWrite,
+    class Write>
+struct lambda_duplex_signal
+    : regular_signal<
+          lambda_duplex_signal<Value, HasValue, Read, ReadyToWrite, Write>,
+          Value,
+          move_activated_duplex_signal>
+{
+    lambda_duplex_signal(
+        HasValue has_value,
+        Read read,
+        ReadyToWrite ready_to_write,
+        Write write)
+        : has_value_(has_value),
+          read_(read),
+          value_(decltype(read())()),
+          ready_to_write_(ready_to_write),
+          write_(write)
+    {
+    }
+    bool
+    has_value() const override
+    {
+        return has_value_();
+    }
+    Value const&
+    read() const override
+    {
+        value_ = read_();
+        return value_;
+    }
+    Value
+    move_out() const override
+    {
+        return read_();
+    }
+    Value&
+    destructive_ref() const override
+    {
+        value_ = read_();
+        return value_;
+    }
+    bool
+    ready_to_write() const override
+    {
+        return ready_to_write_();
+    }
+    id_interface const&
+    write(Value value) const override
+    {
+        write_(std::move(value));
+        return null_id;
+    }
+
+ private:
+    HasValue has_value_;
+    Read read_;
+    mutable decltype(read_()) value_;
+    ReadyToWrite ready_to_write_;
+    Write write_;
+};
+template<class HasValue, class Read, class ReadyToWrite, class Write>
+auto
+lambda_duplex(
+    HasValue has_value, Read read, ReadyToWrite ready_to_write, Write write)
+{
+    return lambda_duplex_signal<
+        std::decay_t<decltype(read())>,
+        HasValue,
+        Read,
+        ReadyToWrite,
+        Write>(has_value, read, ready_to_write, write);
+}
+
+// lambda_duplex(has_value, read, ready_to_write, write, generate_id) creates a
+// duplex signal whose value is read by calling :has_value and :read and
+// written by calling :ready_to_write and :write. Its ID is determined by
+// calling :generate_id.
+template<
+    class Value,
+    class HasValue,
+    class Read,
+    class ReadyToWrite,
+    class Write,
+    class GenerateId>
+struct lambda_duplex_signal_with_id : signal<
+                                          lambda_duplex_signal_with_id<
+                                              Value,
+                                              HasValue,
+                                              Read,
+                                              ReadyToWrite,
+                                              Write,
+                                              GenerateId>,
+                                          Value,
+                                          move_activated_duplex_signal>
+{
+    lambda_duplex_signal_with_id(
+        HasValue has_value,
+        Read read,
+        ReadyToWrite ready_to_write,
+        Write write,
+        GenerateId generate_id)
+        : has_value_(has_value),
+          read_(read),
+          value_(decltype(read())()),
+          ready_to_write_(ready_to_write),
+          write_(write),
+          generate_id_(generate_id)
+    {
+    }
+    id_interface const&
+    value_id() const override
+    {
+        id_ = generate_id_();
+        return id_;
+    }
+    bool
+    has_value() const override
+    {
+        return has_value_();
+    }
+    Value const&
+    read() const override
+    {
+        value_ = read_();
+        return value_;
+    }
+    Value
+    move_out() const override
+    {
+        return read_();
+    }
+    Value&
+    destructive_ref() const override
+    {
+        value_ = read_();
+        return value_;
+    }
+    bool
+    ready_to_write() const override
+    {
+        return ready_to_write_();
+    }
+    id_interface const&
+    write(Value value) const override
+    {
+        write_(std::move(value));
+        return null_id;
+    }
+
+ private:
+    HasValue has_value_;
+    Read read_;
+    mutable decltype(read_()) value_;
+    ReadyToWrite ready_to_write_;
+    Write write_;
+    GenerateId generate_id_;
+    mutable decltype(generate_id_()) id_;
+};
+template<
+    class HasValue,
+    class Read,
+    class ReadyToWrite,
+    class Write,
+    class GenerateId>
+auto
+lambda_duplex(
+    HasValue has_value,
+    Read read,
+    ReadyToWrite ready_to_write,
+    Write write,
+    GenerateId generate_id)
+{
+    return lambda_duplex_signal_with_id<
+        std::decay_t<decltype(read())>,
+        HasValue,
+        Read,
+        ReadyToWrite,
+        Write,
+        GenerateId>(has_value, read, ready_to_write, write, generate_id);
+}
+
+// This is just a clear and concise way of indicating that a lambda signal
+// always has a value.
+inline bool
+always_has_value()
+{
+    return true;
+}
+
+// This is just a clear and concise way of indicating that a lambda signal is
+// always ready to write.
+inline bool
+always_ready()
+{
+    return true;
+}
+
+} // namespace alia
+
+
+
+namespace alia {
+
+enum class async_status
+{
+    UNREADY,
+    LAUNCHED,
+    COMPLETE,
+    FAILED
+};
+
+template<class Value>
+struct async_operation_data
+{
+    async_status status = async_status::UNREADY;
+    // This is used to identify the result of the operation. It's incremented
+    // every time the inputs change.
+    counter_type version = 0;
+    // If status is COMPLETE, this is the result.
+    Value result;
+    // If status is FAILED, this is the error.
+    std::exception_ptr error;
+};
+
+template<class Value>
+void
+reset(async_operation_data<Value>& data)
+{
+    ++data.version;
+    data.status = async_status::UNREADY;
+}
+
+template<class Value>
+struct async_signal : signal<async_signal<Value>, Value, read_only_signal>
+{
+    async_signal(async_operation_data<Value>& data) : data_(&data)
+    {
+    }
+    id_interface const&
+    value_id() const
+    {
+        id_ = make_id(data_->version);
+        return id_;
+    }
+    bool
+    has_value() const
+    {
+        return data_->status == async_status::COMPLETE;
+    }
+    Value const&
+    read() const
+    {
+        return data_->result;
+    }
+
+ private:
+    async_operation_data<Value>* data_;
+    mutable simple_id<counter_type> id_;
+};
+
+template<class Value>
+async_signal<Value>
+make_async_signal(async_operation_data<Value>& data)
+{
+    return async_signal<Value>(data);
+}
+
+template<class Result>
+void
+process_async_args(context, async_operation_data<Result>&, bool&)
+{
+}
+template<class Result, class Arg, class... Rest>
+void
+process_async_args(
+    context ctx,
+    async_operation_data<Result>& data,
+    bool& args_ready,
+    Arg const& arg,
+    Rest const&... rest)
+{
+    captured_id* cached_id;
+    get_cached_data(ctx, &cached_id);
+    if (is_refresh_event(ctx))
+    {
+        if (!signal_has_value(arg))
+        {
+            reset(data);
+            args_ready = false;
+        }
+        else if (!cached_id->matches(arg.value_id()))
+        {
+            reset(data);
+            cached_id->capture(arg.value_id());
+        }
+    }
+    process_async_args(ctx, data, args_ready, rest...);
+}
+
+template<class Result>
+struct async_reporter
+{
+    void
+    report_success(Result result) const
+    {
+        auto& data = *data_;
+        if (data.version == version_)
+        {
+            data.result = std::move(result);
+            data.status = async_status::COMPLETE;
+            mark_dirty_component(container_);
+            refresh_system(*system_);
+        }
+    }
+
+    void
+    report_failure(std::exception_ptr error) const
+    {
+        auto& data = *data_;
+        if (data.version == version_)
+        {
+            data.status = async_status::FAILED;
+            data.error = error;
+            mark_dirty_component(container_);
+            refresh_system(*system_);
+        }
+    }
+
+    std::shared_ptr<async_operation_data<Result>> data_;
+    counter_type version_;
+    alia::system* system_;
+    component_container_ptr container_;
+};
+
+template<class Result, class Context, class Launcher, class... Args>
+auto
+async(Context ctx, Launcher launcher, Args const&... args)
+{
+    std::shared_ptr<async_operation_data<Result>>& data_ptr
+        = get_cached_data<std::shared_ptr<async_operation_data<Result>>>(ctx);
+    if (!data_ptr)
+        data_ptr.reset(new async_operation_data<Result>);
+    auto& data = *data_ptr;
+
+    bool args_ready = true;
+    process_async_args(ctx, data, args_ready, args...);
+
+    refresh_handler(ctx, [&](auto ctx) {
+        if (data.status == async_status::UNREADY && args_ready)
+        {
+            try
+            {
+                auto reporter = async_reporter<Result>{
+                    data_ptr,
+                    data.version,
+                    &get<system_tag>(ctx),
+                    get_active_component_container(ctx)};
+                launcher(ctx, reporter, read_signal(args)...);
+                data.status = async_status::LAUNCHED;
+            }
+            catch (...)
+            {
+                data.error = std::current_exception();
+                data.status = async_status::FAILED;
+            }
+        }
+        if (data.status == async_status::FAILED)
+            std::rethrow_exception(data.error);
+    });
+
+    return make_async_signal(data);
+}
+
+} // namespace alia
+
+
+
+
+// This file defines some numerical adaptors for signals.
+
+namespace alia {
+
+// scale(n, factor) creates a new signal that presents a scaled view of :n,
+// where :n and :factor are both numeric signals.
+template<class N, class Factor>
+struct scaled_signal
+    : lazy_signal_wrapper<
+          scaled_signal<N, Factor>,
+          N,
+          typename N::value_type,
+          signal_capabilities<signal_move_activated, N::capabilities::writing>>
+{
+    scaled_signal(N n, Factor scale_factor)
+        : scaled_signal::lazy_signal_wrapper(std::move(n)),
+          scale_factor_(std::move(scale_factor))
+    {
+    }
+    bool
+    has_value() const override
+    {
+        return this->wrapped_.has_value() && scale_factor_.has_value();
+    }
+    typename N::value_type
+    move_out() const override
+    {
+        return this->wrapped_.read() * scale_factor_.read();
+    }
+    id_interface const&
+    value_id() const override
+    {
+        id_ = combine_ids(
+            ref(this->wrapped_.value_id()), ref(scale_factor_.value_id()));
+        return id_;
+    }
+    bool
+    ready_to_write() const override
+    {
+        return this->wrapped_.ready_to_write() && scale_factor_.has_value();
+    }
+    id_interface const&
+    write(typename N::value_type value) const override
+    {
+        this->wrapped_.write(value / forward_signal(scale_factor_));
+        return null_id;
+    }
+
+ private:
+    Factor scale_factor_;
+    mutable id_pair<id_ref, id_ref> id_;
+};
+template<class N, class Factor>
+scaled_signal<N, Factor>
+make_scaled_signal(N n, Factor scale_factor)
+{
+    return scaled_signal<N, Factor>(std::move(n), std::move(scale_factor));
+}
+template<class N, class Factor>
+auto
+scale(N n, Factor scale_factor)
+{
+    return make_scaled_signal(
+        std::move(n), signalize(std::move(scale_factor)));
+}
+
+// offset(n, offset) presents an offset view of :n.
+template<class N, class Offset>
+struct offset_signal
+    : lazy_signal_wrapper<
+          offset_signal<N, Offset>,
+          N,
+          typename N::value_type,
+          signal_capabilities<signal_move_activated, N::capabilities::writing>>
+{
+    offset_signal(N n, Offset offset)
+        : offset_signal::lazy_signal_wrapper(std::move(n)),
+          offset_(std::move(offset))
+    {
+    }
+    bool
+    has_value() const override
+    {
+        return this->wrapped_.has_value() && offset_.has_value();
+    }
+    typename N::value_type
+    move_out() const override
+    {
+        return this->wrapped_.read() + offset_.read();
+    }
+    id_interface const&
+    value_id() const override
+    {
+        id_ = combine_ids(
+            ref(this->wrapped_.value_id()), ref(offset_.value_id()));
+        return id_;
+    }
+    bool
+    ready_to_write() const override
+    {
+        return this->wrapped_.ready_to_write() && offset_.has_value();
+    }
+    id_interface const&
+    write(typename N::value_type value) const override
+    {
+        this->wrapped_.write(value - forward_signal(offset_));
+        return null_id;
+    }
+
+ private:
+    Offset offset_;
+    mutable id_pair<id_ref, id_ref> id_;
+};
+template<class N, class Offset>
+offset_signal<N, Offset>
+make_offset_signal(N n, Offset offset)
+{
+    return offset_signal<N, Offset>(std::move(n), std::move(offset));
+}
+template<class N, class Offset>
+auto
+offset(N n, Offset offset)
+{
+    return make_offset_signal(std::move(n), signalize(std::move(offset)));
+}
+
+// round_signal_writes(n, step) yields a wrapper which rounds any writes to
+// :n so that values are always a multiple of :step.
+template<class N, class Step>
+struct rounding_signal_wrapper
+    : signal_wrapper<rounding_signal_wrapper<N, Step>, N>
+{
+    rounding_signal_wrapper(N n, Step step)
+        : rounding_signal_wrapper::signal_wrapper(std::move(n)),
+          step_(std::move(step))
+    {
+    }
+    bool
+    ready_to_write() const override
+    {
+        return this->wrapped_.ready_to_write() && step_.has_value();
+    }
+    id_interface const&
+    write(typename N::value_type value) const override
+    {
+        typename N::value_type step = step_.read();
+        this->wrapped_.write(
+            std::floor(value / step + typename N::value_type(0.5)) * step);
+        return null_id;
+    }
+
+ private:
+    Step step_;
+};
+template<class N, class Step>
+rounding_signal_wrapper<N, Step>
+make_rounding_signal_wrapper(N n, Step step)
+{
+    return rounding_signal_wrapper<N, Step>(std::move(n), std::move(step));
+}
+template<class N, class Step>
+auto
+round_signal_writes(N n, Step step)
+{
+    return make_rounding_signal_wrapper(
+        std::move(n), signalize(std::move(step)));
+}
+
+} // namespace alia
+
+
+
+#include <cstdio>
+
+namespace alia {
+
+// The following implements a very minimal C++-friendly version of printf that
+// works with signals.
+
+template<class Value>
+Value
+make_printf_friendly(Value x)
+{
+    return x;
+}
+
+inline char const*
+make_printf_friendly(std::string const& x)
+{
+    return x.c_str();
+}
+
+struct printf_format_error : exception
+{
+    printf_format_error() : exception("printf format error")
+    {
+    }
+};
+
+template<class... Args>
+std::string
+invoke_snprintf(std::string const& format, Args const&... args)
+{
+    int length
+        = std::snprintf(0, 0, format.c_str(), make_printf_friendly(args)...);
+    if (length < 0)
+        throw printf_format_error();
+    std::string s;
+    if (length > 0)
+    {
+        s.resize(length);
+        std::snprintf(
+            &s[0], length + 1, format.c_str(), make_printf_friendly(args)...);
+    }
+    return s;
+}
+
+template<class Format, class... Args>
+auto
+printf(context ctx, Format format, Args... args)
+{
+    return apply(
+        ctx,
+        ALIA_LAMBDIFY(invoke_snprintf),
+        signalize(format),
+        signalize(args)...);
+}
+
+// All conversion of values to and from text goes through the functions
+// from_string and to_string. In order to use a particular value type with
+// the text-based widgets and utilities provided here, that type must
+// implement these functions.
+
+#define ALIA_DECLARE_STRING_CONVERSIONS(T)                                    \
+    void from_string(T* value, std::string const& s);                         \
+    std::string to_string(T value);
+
+// from_string(value, s) should parse the string s and store it in *value.
+// It should throw a validation_error if the string doesn't parse.
+
+// to_string(value) should simply return the string form of value.
+
+// Implementations of from_string and to_string are provided for the following
+// types.
+
+ALIA_DECLARE_STRING_CONVERSIONS(short int)
+ALIA_DECLARE_STRING_CONVERSIONS(unsigned short int)
+ALIA_DECLARE_STRING_CONVERSIONS(int)
+ALIA_DECLARE_STRING_CONVERSIONS(unsigned int)
+ALIA_DECLARE_STRING_CONVERSIONS(long int)
+ALIA_DECLARE_STRING_CONVERSIONS(unsigned long int)
+ALIA_DECLARE_STRING_CONVERSIONS(long long int)
+ALIA_DECLARE_STRING_CONVERSIONS(unsigned long long int)
+ALIA_DECLARE_STRING_CONVERSIONS(float)
+ALIA_DECLARE_STRING_CONVERSIONS(double)
+ALIA_DECLARE_STRING_CONVERSIONS(std::string)
+
+// as_text(ctx, x) creates a text-based interface to the signal x.
+template<class Readable>
+auto
+as_text(context ctx, Readable x)
+{
+    return apply(ctx, ALIA_LAMBDIFY(to_string), x);
+}
+
+// as_duplex_text(ctx, x) is similar to as_text but it's duplex.
+template<class Value>
+struct duplex_text_data
+{
+    captured_id input_id;
+    Value input_value;
+    bool output_valid = false;
+    std::string output_text;
+    counter_type output_version = 1;
+};
+template<class Value, class Readable>
+void
+update_duplex_text(duplex_text_data<Value>* data, Readable x)
+{
+    if (signal_has_value(x))
+    {
+        auto const& input_id = x.value_id();
+        if (!data->input_id.matches(input_id))
+        {
+            if (!data->output_valid || read_signal(x) != data->input_value)
+            {
+                data->input_value = read_signal(x);
+                data->output_text = to_string(read_signal(x));
+                data->output_valid = true;
+                ++data->output_version;
+            }
+            data->input_id.capture(input_id);
+        }
+    }
+    else
+    {
+        data->output_valid = false;
+    }
+}
+template<class Wrapped>
+struct duplex_text_signal : casting_signal_wrapper<
+                                duplex_text_signal<Wrapped>,
+                                Wrapped,
+                                std::string,
+                                typename signal_capabilities_intersection<
+                                    movable_duplex_signal,
+                                    typename Wrapped::capabilities>::type>
+{
+    duplex_text_signal(
+        Wrapped wrapped, duplex_text_data<typename Wrapped::value_type>* data)
+        : duplex_text_signal::casting_signal_wrapper(wrapped), data_(data)
+    {
+    }
+    bool
+    has_value() const override
+    {
+        return data_->output_valid;
+    }
+    std::string const&
+    read() const override
+    {
+        return data_->output_text;
+    }
+    std::string
+    move_out() const override
+    {
+        std::string moved_out = std::move(data_->output_text);
+        data_->input_id.clear();
+        data_->output_valid = false;
+        return moved_out;
+    }
+    std::string&
+    destructive_ref() const override
+    {
+        data_->input_id.clear();
+        data_->output_valid = false;
+        return data_->output_text;
+    }
+    id_interface const&
+    value_id() const override
+    {
+        id_ = make_id(data_->output_version);
+        return id_;
+    }
+    id_interface const&
+    write(std::string s) const override
+    {
+        typename Wrapped::value_type value;
+        from_string(&value, s);
+        data_->input_value = value;
+        this->wrapped_.write(std::move(value));
+        data_->output_text = s;
+        ++data_->output_version;
+        return this->value_id();
+    }
+
+ private:
+    duplex_text_data<typename Wrapped::value_type>* data_;
+    mutable simple_id<counter_type> id_;
+};
+template<class Signal>
+duplex_text_signal<Signal>
+as_duplex_text(context ctx, Signal x)
+{
+    duplex_text_data<typename Signal::value_type>* data;
+    get_cached_data(ctx, &data);
+    update_duplex_text(data, x);
+    return duplex_text_signal<Signal>(x, data);
+}
+
+} // namespace alia
+
+
+
+namespace alia {
+
+// size(s), where :s is a signal, yields a signal carrying the size of :s
+// (as determined by calling s.size()).
+template<class ContainerSignal>
+auto
+size(ContainerSignal cs)
+{
+    return lazy_apply(ALIA_MEM_FN(size), std::move(cs));
+}
+
+// is_empty(s), where :s is a signal, yields a signal indicating whether or not
+// :s carries an empty value. (This is determined by calling the `empty()`
+// member function of the value, so it works on most containers (including
+// strings).)
+template<class ContainerSignal>
+auto
+is_empty(ContainerSignal cs)
+{
+    return lazy_apply([](auto const& x) { return x.empty(); }, cs);
+}
+
+// hide_if_empty(s), where :s is a signal, yields a wrapper for :s that will
+// claim to have no value if that value would be empty.
+template<class ContainerSignal>
+auto
+hide_if_empty(ContainerSignal cs)
+{
+    return mask_reads(cs, !is_empty(cs));
+}
+
+} // namespace alia
+
+
+#include <map>
+#include <utility>
+
+
+namespace alia {
+
+// `transform()` is the component-level version of `std::transform`. See the
+// docs for more details.
+
+// the sequence version...
+
+template<class MappedItem>
+struct mapped_sequence_data
+{
+    captured_id input_id;
+    std::vector<MappedItem> mapped_items;
+    std::vector<captured_id> item_ids;
+    counter_type output_version = 0;
+};
+
+template<class MappedItem>
+struct mapped_sequence_signal : signal<
+                                    mapped_sequence_signal<MappedItem>,
+                                    std::vector<MappedItem>,
+                                    read_only_signal>
+{
+    mapped_sequence_signal(
+        mapped_sequence_data<MappedItem>& data, bool all_items_have_values)
+        : data_(&data), all_items_have_values_(all_items_have_values)
+    {
+    }
+    id_interface const&
+    value_id() const override
+    {
+        id_ = make_id(data_->output_version);
+        return id_;
+    }
+    bool
+    has_value() const override
+    {
+        return all_items_have_values_;
+    }
+    std::vector<MappedItem> const&
+    read() const override
+    {
+        return data_->mapped_items;
+    }
+
+ private:
+    mapped_sequence_data<MappedItem>* data_;
+    bool all_items_have_values_;
+    mutable simple_id<counter_type> id_;
+};
+
+template<
+    class Context,
+    class Container,
+    class Function,
+    std::enable_if_t<
+        !is_map_like<typename Container::value_type>::value,
+        int> = 0>
+auto
+transform(Context ctx, Container const& container, Function&& f)
+{
+    typedef typename decltype(
+        f(std::declval<readable<
+              typename Container::value_type::value_type>>()))::value_type
+        mapped_value_type;
+
+    mapped_sequence_data<mapped_value_type>* data;
+    get_cached_data(ctx, &data);
+
+    bool all_items_have_values = false;
+
+    ALIA_IF(has_value(container))
+    {
+        size_t container_size = read_signal(container).size();
+
+        if (!data->input_id.matches(container.value_id()))
+        {
+            data->mapped_items.resize(container_size);
+            data->item_ids.resize(container_size);
+            ++data->output_version;
+            data->input_id.capture(container.value_id());
+        }
+
+        size_t valid_item_count = 0;
+        auto captured_item = data->mapped_items.begin();
+        auto captured_id = data->item_ids.begin();
+        for_each(ctx, container, [&](auto item) {
+            auto mapped_item = f(item);
+            if (signal_has_value(mapped_item))
+            {
+                if (!captured_id->matches(mapped_item.value_id()))
+                {
+                    *captured_item = read_signal(mapped_item);
+                    captured_id->capture(mapped_item.value_id());
+                    ++data->output_version;
+                }
+                ++valid_item_count;
+            }
+            ++captured_item;
+            ++captured_id;
+        });
+        assert(captured_item == data->mapped_items.end());
+        assert(captured_id == data->item_ids.end());
+
+        all_items_have_values = (valid_item_count == container_size);
+    }
+    ALIA_END
+
+    return mapped_sequence_signal<mapped_value_type>(
+        *data, all_items_have_values);
+}
+
+// the map version...
+
+template<class Key, class MappedItem>
+struct mapped_map_data
+{
+    captured_id input_id;
+    std::map<Key, MappedItem> mapped_items;
+    std::vector<captured_id> item_ids;
+    counter_type output_version = 0;
+};
+
+template<class Key, class MappedItem>
+struct mapped_map_signal : signal<
+                               mapped_map_signal<Key, MappedItem>,
+                               std::map<Key, MappedItem>,
+                               read_only_signal>
+{
+    mapped_map_signal(
+        mapped_map_data<Key, MappedItem>& data, bool all_items_have_values)
+        : data_(&data), all_items_have_values_(all_items_have_values)
+    {
+    }
+    id_interface const&
+    value_id() const override
+    {
+        id_ = make_id(data_->output_version);
+        return id_;
+    }
+    bool
+    has_value() const override
+    {
+        return all_items_have_values_;
+    }
+    std::map<Key, MappedItem> const&
+    read() const override
+    {
+        return data_->mapped_items;
+    }
+
+ private:
+    mapped_map_data<Key, MappedItem>* data_;
+    bool all_items_have_values_;
+    mutable simple_id<counter_type> id_;
+};
+
+template<
+    class Context,
+    class Container,
+    class Function,
+    std::enable_if_t<
+        is_map_like<typename Container::value_type>::value,
+        int> = 0>
+auto
+transform(Context ctx, Container const& container, Function&& f)
+{
+    typedef typename Container::value_type::key_type key_type;
+    typedef typename decltype(
+        f(std::declval<readable<key_type>>(),
+          std::declval<readable<
+              typename Container::value_type::mapped_type>>()))::value_type
+        mapped_value_type;
+
+    mapped_map_data<key_type, mapped_value_type>* data;
+    get_cached_data(ctx, &data);
+
+    bool all_items_have_values = false;
+
+    ALIA_IF(has_value(container))
+    {
+        size_t container_size = read_signal(container).size();
+
+        if (!data->input_id.matches(container.value_id()))
+        {
+            // There's probably a less heavy-handed approach to this, but
+            // this works for now.
+            data->mapped_items.clear();
+            data->item_ids.clear();
+            data->item_ids.resize(container_size);
+            ++data->output_version;
+            data->input_id.capture(container.value_id());
+        }
+
+        size_t valid_item_count = 0;
+        auto captured_id = data->item_ids.begin();
+        for_each(ctx, container, [&](auto key, auto value) {
+            auto mapped_item = f(key, value);
+            if (signal_has_value(mapped_item))
+            {
+                if (!captured_id->matches(mapped_item.value_id()))
+                {
+                    data->mapped_items[read_signal(key)]
+                        = read_signal(mapped_item);
+                    captured_id->capture(mapped_item.value_id());
+                    ++data->output_version;
+                }
+                ++valid_item_count;
+            }
+            ++captured_id;
+        });
+        assert(captured_id == data->item_ids.end());
+
+        all_items_have_values = (valid_item_count == container_size);
+    }
+    ALIA_END
+
+    return mapped_map_signal<key_type, mapped_value_type>(
+        *data, all_items_have_values);
+}
+
+} // namespace alia
+
+
+
+namespace alia {
+
+// state_storage<Value> is designed to be stored persistently within the
+// component tree to represent application state or other data that needs to be
+// tracked similarly. It contains a 'version' number that counts changes and
+// serves as a signal value ID, and it also takes care of mark the component
+// tree as 'dirty' when it's updated.
+template<class Value>
+struct state_storage
+{
+    state_storage() : version_(0)
+    {
+    }
+
+    explicit state_storage(Value value) : value_(std::move(value)), version_(1)
+    {
+    }
+
+    bool
+    is_initialized() const
+    {
+        return version_ != 0;
+    }
+
+    bool
+    has_value() const
+    {
+        return (version_ & 1) != 0;
+    }
+
+    Value const&
+    get() const
+    {
+        return value_;
+    }
+
+    unsigned
+    version() const
+    {
+        return version_;
+    }
+
+    void
+    set(Value value)
+    {
+        value_ = std::move(value);
+        set_valid_flag();
+        handle_tracked_change();
+    }
+
+    void
+    clear()
+    {
+        clear_valid_flag();
+        handle_tracked_change();
+    }
+
+    // If you REALLY need direct, non-const access to the underlying state,
+    // you can use this. It returns a non-const reference to the value and
+    // increments the version number (assuming you'll make some changes).
+    //
+    // Note that you should be careful to use this atomically. In other words,
+    // call this to get a reference, do your update, and then discard the
+    // reference before anyone else observes the state. If you hold onto the
+    // reference and continue making changes while other alia code is accessing
+    // it, they'll end up with outdated views of the state.
+    //
+    // Also note that if you call this on an uninitialized state, you're
+    // expected to initialize it.
+    //
+    Value&
+    nonconst_ref()
+    {
+        set_valid_flag();
+        handle_tracked_change();
+        return value_;
+    }
+
+    // This is even less safe. It's like above, but any changes you make will
+    // NOT be marked in the component tree, so you should only use this if you
+    // know it's safe to do so.
+    Value&
+    untracked_nonconst_ref()
+    {
+        set_valid_flag();
+        inc_version();
+        return value_;
+    }
+
+    // Similarly unsafe way to clear the value.
+    void
+    untracked_clear()
+    {
+        clear_valid_flag();
+        inc_version();
+    }
+
+    // Update the container that the state is part of.
+    void
+    refresh_container(component_container_ptr const& container)
+    {
+        container_ = container;
+    }
+
+ private:
+    void
+    set_valid_flag()
+    {
+        version_ |= 1;
+    }
+
+    void
+    clear_valid_flag()
+    {
+        version_ &= ~1;
+    }
+
+    void
+    inc_version()
+    {
+        version_ += 2;
+    }
+
+    void
+    handle_tracked_change()
+    {
+        inc_version();
+        mark_dirty_component(container_);
+    }
+
+    Value value_;
+    // version_ is incremented for each change in the value (or validity) of
+    // the state. The lowest bit of this indicates if the value is valid.
+    unsigned version_;
+    component_container_ptr container_;
+};
+
+template<class Value>
+struct state_signal
+    : signal<
+          state_signal<Value>,
+          Value,
+          signal_capabilities<signal_movable, signal_clearable>>
+{
+    explicit state_signal(state_storage<Value>* data) : data_(data)
+    {
+    }
+
+    simple_id<unsigned> const&
+    value_id() const override
+    {
+        id_ = make_id(data_->version());
+        return id_;
+    }
+    bool
+    has_value() const override
+    {
+        return data_->has_value();
+    }
+    Value const&
+    read() const override
+    {
+        return data_->get();
+    }
+    Value
+    move_out() const override
+    {
+        Value moved = std::move(data_->untracked_nonconst_ref());
+        return moved;
+    }
+    Value&
+    destructive_ref() const override
+    {
+        return data_->untracked_nonconst_ref();
+    }
+
+    bool
+    ready_to_write() const override
+    {
+        return true;
+    }
+    id_interface const&
+    write(Value value) const override
+    {
+        data_->set(std::move(value));
+        return this->value_id();
+    }
+    void
+    clear() const override
+    {
+        data_->clear();
+    }
+
+ private:
+    state_storage<Value>* data_;
+    mutable simple_id<unsigned> id_;
+};
+
+template<class Value>
+state_signal<Value>
+make_state_signal(state_storage<Value>& data)
+{
+    return state_signal<Value>(&data);
+}
+
+namespace detail {
+
+template<class Context, class Value, class InitialValueSignal>
+void
+common_state_signal_logic(
+    Context ctx,
+    state_storage<Value>* state,
+    InitialValueSignal const& initial_value_signal)
+{
+    refresh_handler(ctx, [&](auto ctx) {
+        state->refresh_container(get_active_component_container(ctx));
+        if (!state->is_initialized() && signal_has_value(initial_value_signal))
+        {
+            state->untracked_nonconst_ref()
+                = forward_signal(initial_value_signal);
+        }
+    });
+}
+
+} // namespace detail
+
+// get_state(ctx, initial_value) returns a signal carrying some persistent
+// local state whose initial value is determined by the :initial_value signal.
+// The returned signal will not have a value until :initial_value has one or
+// one is explicitly written to the state signal.
+template<class Context, class InitialValue>
+auto
+get_state(Context ctx, InitialValue initial_value)
+{
+    auto initial_value_signal = signalize(std::move(initial_value));
+
+    state_storage<typename decltype(initial_value_signal)::value_type>* state;
+    get_data(ctx, &state);
+
+    detail::common_state_signal_logic(ctx, state, initial_value_signal);
+
+    return make_state_signal(*state);
+}
+
+// get_transient_state(ctx, initial_value) returns a signal carrying some
+// transient local state whose initial value is determined by the
+// :initial_value signal. The returned signal will not have a value until
+// :initial_value has one or one is explicitly written to the state signal.
+//
+// Unlike get_state, this returns state that does *not* persist when the
+// component is inactive. Rather, it is reinitialized whenever the component is
+// activated.
+//
+template<class Context, class InitialValue>
+auto
+get_transient_state(Context ctx, InitialValue initial_value)
+{
+    auto initial_value_signal = signalize(std::move(initial_value));
+
+    state_storage<typename decltype(initial_value_signal)::value_type>* state;
+    get_cached_data(ctx, &state);
+
+    detail::common_state_signal_logic(ctx, state, initial_value_signal);
+
+    return make_state_signal(*state);
+}
+
+} // namespace alia
+
 #ifdef ALIA_IMPLEMENTATION
 #include <typeinfo>
 
@@ -10593,171 +10664,6 @@ operator<(captured_id const& a, captured_id const& b)
 } // namespace alia
 
 
-namespace alia {
-
-template<class T>
-bool
-string_to_value(std::string const& str, T* value)
-{
-    std::istringstream s(str);
-    T x;
-    if (!(s >> x))
-        return false;
-    s >> std::ws;
-    if (s.eof())
-    {
-        *value = x;
-        return true;
-    }
-    return false;
-}
-
-template<class T>
-std::string
-value_to_string(T const& value)
-{
-    std::ostringstream s;
-    s << value;
-    return s.str();
-}
-
-template<class T>
-void
-float_from_string(T* value, std::string const& str)
-{
-    if (!string_to_value(str, value))
-        throw validation_error("This input expects a number.");
-}
-
-#define ALIA_FLOAT_CONVERSIONS(T)                                             \
-    void from_string(T* value, std::string const& str)                        \
-    {                                                                         \
-        float_from_string(value, str);                                        \
-    }                                                                         \
-    std::string to_string(T value)                                            \
-    {                                                                         \
-        return value_to_string(value);                                        \
-    }
-
-ALIA_FLOAT_CONVERSIONS(float)
-ALIA_FLOAT_CONVERSIONS(double)
-
-template<class T>
-void
-signed_integer_from_string(T* value, std::string const& str)
-{
-    long long n;
-    if (!string_to_value(str, &n))
-        throw validation_error("This input expects an integer.");
-    T x = T(n);
-    if (x != n)
-        throw validation_error("This integer is outside the supported range.");
-    *value = x;
-}
-
-template<class T>
-void
-unsigned_integer_from_string(T* value, std::string const& str)
-{
-    unsigned long long n;
-    if (!string_to_value(str, &n))
-        throw validation_error("This input expects an integer.");
-    T x = T(n);
-    if (x != n)
-        throw validation_error("This integer is outside the supported range.");
-    *value = x;
-}
-
-#define ALIA_SIGNED_INTEGER_CONVERSIONS(T)                                    \
-    void from_string(T* value, std::string const& str)                        \
-    {                                                                         \
-        signed_integer_from_string(value, str);                               \
-    }                                                                         \
-    std::string to_string(T value)                                            \
-    {                                                                         \
-        return value_to_string(value);                                        \
-    }
-
-#define ALIA_UNSIGNED_INTEGER_CONVERSIONS(T)                                  \
-    void from_string(T* value, std::string const& str)                        \
-    {                                                                         \
-        unsigned_integer_from_string(value, str);                             \
-    }                                                                         \
-    std::string to_string(T value)                                            \
-    {                                                                         \
-        return value_to_string(value);                                        \
-    }
-
-ALIA_SIGNED_INTEGER_CONVERSIONS(short int)
-ALIA_UNSIGNED_INTEGER_CONVERSIONS(unsigned short int)
-ALIA_SIGNED_INTEGER_CONVERSIONS(int)
-ALIA_UNSIGNED_INTEGER_CONVERSIONS(unsigned int)
-ALIA_SIGNED_INTEGER_CONVERSIONS(long int)
-ALIA_UNSIGNED_INTEGER_CONVERSIONS(unsigned long int)
-ALIA_SIGNED_INTEGER_CONVERSIONS(long long int)
-ALIA_UNSIGNED_INTEGER_CONVERSIONS(unsigned long long int)
-
-void
-from_string(std::string* value, std::string const& str)
-{
-    *value = str;
-}
-std::string
-to_string(std::string value)
-{
-    return value;
-}
-
-} // namespace alia
-
-
-namespace alia {
-
-void
-schedule_animation_refresh(dataless_context ctx)
-{
-    // Invoke the virtual method on the external system interface.
-    // And also set a flag to indicate that a refresh is needed.
-    system& sys = get<system_tag>(ctx);
-    if (!sys.refresh_needed)
-    {
-        if (sys.external)
-            sys.external->schedule_animation_refresh();
-        sys.refresh_needed = true;
-    }
-    // Ensure that this component gets visited on the next refresh pass.
-    mark_animating_component(ctx);
-}
-
-millisecond_count
-get_raw_animation_tick_count(dataless_context ctx)
-{
-    schedule_animation_refresh(ctx);
-    return get<timing_tag>(ctx).tick_counter;
-}
-
-value_signal<millisecond_count>
-get_animation_tick_count(dataless_context ctx)
-{
-    return value(get_raw_animation_tick_count(ctx));
-}
-
-millisecond_count
-get_raw_animation_ticks_left(dataless_context ctx, millisecond_count end_time)
-{
-    int ticks_remaining = int(end_time - get<timing_tag>(ctx).tick_counter);
-    if (ticks_remaining > 0)
-    {
-        if (is_refresh_event(ctx))
-            schedule_animation_refresh(ctx);
-        return millisecond_count(ticks_remaining);
-    }
-    return 0;
-}
-
-} // namespace alia
-
-
 namespace alia { namespace detail {
 
 struct square_wave_data
@@ -10798,6 +10704,73 @@ square_wave(
 }
 
 }} // namespace alia::detail
+
+namespace alia {
+
+void
+schedule_timer_event(
+    dataless_context ctx,
+    external_component_id id,
+    millisecond_count trigger_time)
+{
+    auto& sys = get<system_tag>(ctx);
+    sys.external->schedule_timer_event(id, trigger_time);
+}
+
+bool
+detect_timer_event(dataless_context ctx, timer_data& data)
+{
+    timer_event* event;
+    return detect_targeted_event(ctx, &data.identity, &event)
+           && event->trigger_time == data.expected_trigger_time;
+}
+
+void
+start_timer(dataless_context ctx, timer_data& data, millisecond_count duration)
+{
+    auto now = get<timing_tag>(ctx).tick_counter;
+    auto trigger_time = now + duration;
+    data.expected_trigger_time = trigger_time;
+    schedule_timer_event(ctx, externalize(&data.identity), trigger_time);
+}
+
+void
+restart_timer(
+    dataless_context ctx, timer_data& data, millisecond_count duration)
+{
+    timer_event* event;
+    bool detected = detect_event(ctx, &event);
+    assert(detected);
+    if (detected)
+    {
+        auto trigger_time = event->trigger_time + duration;
+        data.expected_trigger_time = trigger_time;
+        schedule_timer_event(ctx, externalize(&data.identity), trigger_time);
+    }
+}
+
+void
+timer::update()
+{
+    triggered_ = data_->active && detect_timer_event(ctx_, *data_);
+    if (triggered_)
+        data_->active = false;
+    refresh_handler(ctx_, [&](auto ctx) {
+        refresh_component_identity(ctx, data_->identity);
+    });
+}
+
+void
+timer::start(unsigned duration)
+{
+    if (triggered_)
+        restart_timer(ctx_, *data_, duration);
+    else
+        start_timer(ctx_, *data_, duration);
+    data_->active = true;
+}
+
+} // namespace alia
 
 namespace alia {
 
@@ -10877,69 +10850,49 @@ get_time_until_next_event(
 
 } // namespace alia
 
+
 namespace alia {
 
 void
-schedule_timer_event(
-    dataless_context ctx,
-    external_component_id id,
-    millisecond_count trigger_time)
+schedule_animation_refresh(dataless_context ctx)
 {
-    auto& sys = get<system_tag>(ctx);
-    sys.external->schedule_timer_event(id, trigger_time);
-}
-
-bool
-detect_timer_event(dataless_context ctx, timer_data& data)
-{
-    timer_event* event;
-    return detect_targeted_event(ctx, &data.identity, &event)
-           && event->trigger_time == data.expected_trigger_time;
-}
-
-void
-start_timer(dataless_context ctx, timer_data& data, millisecond_count duration)
-{
-    auto now = get<timing_tag>(ctx).tick_counter;
-    auto trigger_time = now + duration;
-    data.expected_trigger_time = trigger_time;
-    schedule_timer_event(ctx, externalize(&data.identity), trigger_time);
-}
-
-void
-restart_timer(
-    dataless_context ctx, timer_data& data, millisecond_count duration)
-{
-    timer_event* event;
-    bool detected = detect_event(ctx, &event);
-    assert(detected);
-    if (detected)
+    // Invoke the virtual method on the external system interface.
+    // And also set a flag to indicate that a refresh is needed.
+    system& sys = get<system_tag>(ctx);
+    if (!sys.refresh_needed)
     {
-        auto trigger_time = event->trigger_time + duration;
-        data.expected_trigger_time = trigger_time;
-        schedule_timer_event(ctx, externalize(&data.identity), trigger_time);
+        if (sys.external)
+            sys.external->schedule_animation_refresh();
+        sys.refresh_needed = true;
     }
+    // Ensure that this component gets visited on the next refresh pass.
+    mark_animating_component(ctx);
 }
 
-void
-timer::update()
+millisecond_count
+get_raw_animation_tick_count(dataless_context ctx)
 {
-    triggered_ = data_->active && detect_timer_event(ctx_, *data_);
-    if (triggered_)
-        data_->active = false;
-    on_refresh(ctx_, [&](auto ctx) {
-        refresh_component_identity(ctx, data_->identity);
-    });
+    schedule_animation_refresh(ctx);
+    return get<timing_tag>(ctx).tick_counter;
 }
 
-void
-timer::start(unsigned duration)
+value_signal<millisecond_count>
+get_animation_tick_count(dataless_context ctx)
 {
-    if (triggered_)
-        restart_timer(ctx_, *data_, duration);
-    else
-        start_timer(ctx_, *data_, duration);
-    data_->active = true;
+    return value(get_raw_animation_tick_count(ctx));
+}
+
+millisecond_count
+get_raw_animation_ticks_left(dataless_context ctx, millisecond_count end_time)
+{
+    int ticks_remaining = int(end_time - get<timing_tag>(ctx).tick_counter);
+    if (ticks_remaining > 0)
+    {
+        if (is_refresh_event(ctx))
+            schedule_animation_refresh(ctx);
+        return millisecond_count(ticks_remaining);
+    }
+    return 0;
 }
 
 } // namespace alia
@@ -11042,6 +10995,91 @@ eval_curve_at_x(unit_cubic_bezier const& curve, double x, double epsilon)
 
 } // namespace alia
 
+#include <chrono>
+
+namespace alia {
+
+millisecond_count
+default_external_interface::get_tick_count() const
+{
+    static auto start = std::chrono::steady_clock::now();
+    auto now = std::chrono::steady_clock::now();
+    return std::chrono::duration_cast<
+               std::chrono::duration<millisecond_count, std::milli>>(
+               now - start)
+        .count();
+}
+
+void
+default_external_interface::schedule_timer_event(
+    external_component_id component, millisecond_count time)
+{
+    schedule_event(owner.scheduler, component, time);
+}
+
+void
+initialize_system(
+    system& sys,
+    std::function<void(context)> const& controller,
+    external_interface* external)
+{
+    sys.controller = controller;
+    sys.external.reset(
+        external ? external : new default_external_interface(sys));
+    sys.root_component.reset(new component_container);
+}
+
+void
+process_internal_timing_events(system& sys, millisecond_count now)
+{
+    issue_ready_events(
+        sys.scheduler,
+        now,
+        [&](external_component_id component, millisecond_count trigger_time) {
+            timer_event event;
+            event.trigger_time = trigger_time;
+            dispatch_targeted_event(sys, event, component);
+        });
+}
+
+} // namespace alia
+
+
+
+namespace alia {
+
+bool
+system_needs_refresh(system const& sys)
+{
+    return sys.refresh_needed;
+}
+
+void
+refresh_system(system& sys)
+{
+    sys.refresh_needed = false;
+    ++sys.refresh_counter;
+
+    int pass_count = 0;
+    while (true)
+    {
+        refresh_event refresh;
+        detail::dispatch_event(sys, refresh);
+        if (!sys.root_component->dirty)
+            break;
+        ++pass_count;
+        assert(pass_count < 64);
+    };
+}
+
+void
+set_error_handler(system& sys, std::function<void(std::exception_ptr)> handler)
+{
+    sys.error_handler = handler;
+}
+
+} // namespace alia
+
 
 namespace alia {
 
@@ -11104,136 +11142,75 @@ fold_in_content_id(context ctx, id_interface const& id)
 
 namespace alia {
 
-static void
-invoke_controller(system& sys, event_traversal& events)
+try_block::try_block(context ctx) : ctx_(ctx)
 {
-    events.is_refresh = (events.event_type == &typeid(refresh_event));
-
-    data_traversal data;
-    scoped_data_traversal sdt(sys.data, data);
-    // Only use refresh events to decide when data is no longer needed.
-    data.gc_enabled = data.cache_clearing_enabled = events.is_refresh;
-
-    timing_subsystem timing;
-    timing.tick_counter = sys.external->get_tick_count();
-
-    context_storage storage;
-    context ctx = make_context(&storage, sys, events, data, timing);
-
-    scoped_component_container root(ctx, &sys.root_component);
-
-    sys.controller(ctx);
-}
-
-namespace detail {
-
-static void
-route_event_(
-    system& sys, event_traversal& traversal, component_container* target)
-{
-    // In order to construct the path to the target, we start at the target
-    // and follow the 'parent' pointers until we reach the root. We do this
-    // via recursion so that the path can be constructed entirely on the
-    // stack.
-    if (target)
-    {
-        event_routing_path path_node;
-        path_node.rest = traversal.path_to_target;
-        path_node.node = target;
-        traversal.path_to_target = &path_node;
-        route_event_(sys, traversal, target->parent.get());
-    }
-    else
-    {
-        invoke_controller(sys, traversal);
-    }
-}
-
-void
-route_event(
-    system& sys, event_traversal& traversal, component_container* target)
-{
-    try
-    {
-        route_event_(sys, traversal, target);
-    }
-    catch (traversal_abortion&)
-    {
-    }
-}
-
-} // namespace detail
-
-void
-abort_traversal(dataless_context ctx)
-{
-    assert(!is_refresh_event(ctx));
-    get_event_traversal(ctx).aborted = true;
-    throw traversal_abortion();
-}
-
-void
-refresh_component_identity(dataless_context ctx, component_identity& identity)
-{
-    auto const& active_container = get_active_component_container(ctx);
-    if (identity != active_container)
-        identity = active_container;
-}
-
-component_id
-get_component_id(context ctx)
-{
-    component_id id;
-    get_cached_data(ctx, &id);
-    on_refresh(ctx, [&](auto ctx) { refresh_component_identity(ctx, *id); });
-    return id;
-}
-
-struct initialization_detection
-{
-    bool initialized = false;
-};
-
-void
-on_init(context ctx, action<> on_init)
-{
-    initialization_detection& data = get_data<initialization_detection>(ctx);
-    on_refresh(ctx, [&](auto) {
-        if (!data.initialized && on_init.is_ready())
+    get_cached_data(ctx, &data_);
+    refresh_handler(ctx, [&](auto ctx) {
+        auto refresh_counter = get<system_tag>(ctx).refresh_counter;
+        if (data_->last_refresh != refresh_counter)
         {
-            isolate_errors(ctx, [&] { perform_action(on_init); });
-            mark_dirty_component(ctx);
-            data.initialized = true;
+            // This is a new refresh pass, so clear out any exception that we
+            // might have stored. We'll (re)try the body content under the
+            // assumption that it won't throw an exception this time.
+            data_->exception = nullptr;
+            data_->last_refresh = refresh_counter;
+        }
+        else if (data_->exception && data_->uncaught)
+        {
+            // An exception was thrown from inside this try_block, but none of
+            // the associated catch statements could handle it, so we need to
+            // rethrow it to the surrounding components.
+            std::rethrow_exception(data_->exception);
         }
     });
+    uncaught_ = data_->exception ? true : false;
 }
 
 void
-on_activate(context ctx, action<> on_activate)
+try_block::operator<<(function_view<void()> body)
 {
-    initialization_detection& data
-        = get_cached_data<initialization_detection>(ctx);
-    on_refresh(ctx, [&](auto) {
-        if (!data.initialized && on_activate.is_ready())
+    // This if statement will evaluate to true if either:
+    // 1. We are starting a new refresh. In this case, we need to try the body
+    //    to see if it actually throws.
+    // 2. We are processing a non-refresh event and there is no exception being
+    //    generated from inside the body. In this case, the body is the proper
+    //    component to handle the event.
+    ALIA_EVENT_DEPENDENT_IF_(ctx_, !data_->exception)
+    {
+        try
         {
-            isolate_errors(ctx, [&] { perform_action(on_activate); });
-            mark_dirty_component(ctx);
-            data.initialized = true;
+            body();
         }
-    });
+        catch (...)
+        {
+            if (is_refresh_event(ctx_))
+            {
+                // We tried the body and got an exception, so record it for
+                // processing by the catch clauses.
+                data_->exception = std::current_exception();
+                data_->uncaught = false;
+                mark_dirty_component(ctx_);
+            }
+            else
+            {
+                // An exception was thrown by an event handler. (This could
+                // just be a normal traversal_abortion event.) Just pass it
+                // along.
+                throw;
+            }
+        }
+    }
+    ALIA_END
 }
 
-void
-isolate_errors(system& sys, function_view<void()> const& function)
+try_block::~try_block()
 {
-    try
+    if (uncaught_ && !exception_detector_.detect())
     {
-        function();
-    }
-    catch (...)
-    {
-        if (sys.error_handler)
-            sys.error_handler(std::current_exception());
+        // We caught an exception but failed to handle it, so we need to record
+        // that fact so we can rethrow it to the surrounding components.
+        mark_dirty_component(ctx_);
+        data_->uncaught = true;
     }
 }
 
@@ -11388,6 +11365,144 @@ event_dependent_if_block::event_dependent_if_block(
     if (condition)
     {
         scoped_data_block_.begin(traversal, node->block);
+    }
+}
+
+} // namespace alia
+
+
+namespace alia {
+
+static void
+invoke_controller(system& sys, event_traversal& events)
+{
+    events.is_refresh = (events.event_type == &typeid(refresh_event));
+
+    data_traversal data;
+    scoped_data_traversal sdt(sys.data, data);
+    // Only use refresh events to decide when data is no longer needed.
+    data.gc_enabled = data.cache_clearing_enabled = events.is_refresh;
+
+    timing_subsystem timing;
+    timing.tick_counter = sys.external->get_tick_count();
+
+    context_storage storage;
+    context ctx = make_context(&storage, sys, events, data, timing);
+
+    scoped_component_container root(ctx, &sys.root_component);
+
+    sys.controller(ctx);
+}
+
+namespace detail {
+
+static void
+route_event_(
+    system& sys, event_traversal& traversal, component_container* target)
+{
+    // In order to construct the path to the target, we start at the target
+    // and follow the 'parent' pointers until we reach the root. We do this
+    // via recursion so that the path can be constructed entirely on the
+    // stack.
+    if (target)
+    {
+        event_routing_path path_node;
+        path_node.rest = traversal.path_to_target;
+        path_node.node = target;
+        traversal.path_to_target = &path_node;
+        route_event_(sys, traversal, target->parent.get());
+    }
+    else
+    {
+        invoke_controller(sys, traversal);
+    }
+}
+
+void
+route_event(
+    system& sys, event_traversal& traversal, component_container* target)
+{
+    try
+    {
+        route_event_(sys, traversal, target);
+    }
+    catch (traversal_abortion&)
+    {
+    }
+}
+
+} // namespace detail
+
+void
+abort_traversal(dataless_context ctx)
+{
+    assert(!is_refresh_event(ctx));
+    get_event_traversal(ctx).aborted = true;
+    throw traversal_abortion();
+}
+
+void
+refresh_component_identity(dataless_context ctx, component_identity& identity)
+{
+    auto const& active_container = get_active_component_container(ctx);
+    if (identity != active_container)
+        identity = active_container;
+}
+
+component_id
+get_component_id(context ctx)
+{
+    component_id id;
+    get_cached_data(ctx, &id);
+    refresh_handler(ctx, [&](auto ctx) { refresh_component_identity(ctx, *id); });
+    return id;
+}
+
+struct initialization_detection
+{
+    bool initialized = false;
+};
+
+void
+on_init(context ctx, action<> on_init)
+{
+    initialization_detection& data = get_data<initialization_detection>(ctx);
+    refresh_handler(ctx, [&](auto) {
+        if (!data.initialized && on_init.is_ready())
+        {
+            isolate_errors(ctx, [&] { perform_action(on_init); });
+            mark_dirty_component(ctx);
+            data.initialized = true;
+        }
+    });
+}
+
+void
+on_activate(context ctx, action<> on_activate)
+{
+    initialization_detection& data
+        = get_cached_data<initialization_detection>(ctx);
+    refresh_handler(ctx, [&](auto) {
+        if (!data.initialized && on_activate.is_ready())
+        {
+            isolate_errors(ctx, [&] { perform_action(on_activate); });
+            mark_dirty_component(ctx);
+            data.initialized = true;
+        }
+    });
+}
+
+void
+isolate_errors(system& sys, function_view<void()> const& function)
+{
+    try
+    {
+        function();
+    }
+    catch (...)
+    {
+        if (sys.error_handler)
+            sys.error_handler(std::current_exception());
     }
 }
 
@@ -11845,161 +11960,117 @@ scoped_data_traversal::end()
 
 namespace alia {
 
-try_block::try_block(context ctx) : ctx_(ctx)
-{
-    get_cached_data(ctx, &data_);
-    on_refresh(ctx, [&](auto ctx) {
-        auto refresh_counter = get<system_tag>(ctx).refresh_counter;
-        if (data_->last_refresh != refresh_counter)
-        {
-            // This is a new refresh pass, so clear out any exception that we
-            // might have stored. We'll (re)try the body content under the
-            // assumption that it won't throw an exception this time.
-            data_->exception = nullptr;
-            data_->last_refresh = refresh_counter;
-        }
-        else if (data_->exception && data_->uncaught)
-        {
-            // An exception was thrown from inside this try_block, but none of
-            // the associated catch statements could handle it, so we need to
-            // rethrow it to the surrounding components.
-            std::rethrow_exception(data_->exception);
-        }
-    });
-    uncaught_ = data_->exception ? true : false;
-}
-
-void
-try_block::operator<<(function_view<void()> body)
-{
-    // This if statement will evaluate to true if either:
-    // 1. We are starting a new refresh. In this case, we need to try the body
-    //    to see if it actually throws.
-    // 2. We are processing a non-refresh event and there is no exception being
-    //    generated from inside the body. In this case, the body is the proper
-    //    component to handle the event.
-    ALIA_EVENT_DEPENDENT_IF_(ctx_, !data_->exception)
-    {
-        try
-        {
-            body();
-        }
-        catch (...)
-        {
-            if (is_refresh_event(ctx_))
-            {
-                // We tried the body and got an exception, so record it for
-                // processing by the catch clauses.
-                data_->exception = std::current_exception();
-                data_->uncaught = false;
-                mark_dirty_component(ctx_);
-            }
-            else
-            {
-                // An exception was thrown by an event handler. (This could
-                // just be a normal traversal_abortion event.) Just pass it
-                // along.
-                throw;
-            }
-        }
-    }
-    ALIA_END
-}
-
-try_block::~try_block()
-{
-    if (uncaught_ && !exception_detector_.detect())
-    {
-        // We caught an exception but failed to handle it, so we need to record
-        // that fact so we can rethrow it to the surrounding components.
-        mark_dirty_component(ctx_);
-        data_->uncaught = true;
-    }
-}
-
-} // namespace alia
-
-#include <chrono>
-
-namespace alia {
-
-millisecond_count
-default_external_interface::get_tick_count() const
-{
-    static auto start = std::chrono::steady_clock::now();
-    auto now = std::chrono::steady_clock::now();
-    return std::chrono::duration_cast<
-               std::chrono::duration<millisecond_count, std::milli>>(
-               now - start)
-        .count();
-}
-
-void
-default_external_interface::schedule_timer_event(
-    external_component_id component, millisecond_count time)
-{
-    schedule_event(owner.scheduler, component, time);
-}
-
-void
-initialize_system(
-    system& sys,
-    std::function<void(context)> const& controller,
-    external_interface* external)
-{
-    sys.controller = controller;
-    sys.external.reset(
-        external ? external : new default_external_interface(sys));
-    sys.root_component.reset(new component_container);
-}
-
-void
-process_internal_timing_events(system& sys, millisecond_count now)
-{
-    issue_ready_events(
-        sys.scheduler,
-        now,
-        [&](external_component_id component, millisecond_count trigger_time) {
-            timer_event event;
-            event.trigger_time = trigger_time;
-            dispatch_targeted_event(sys, event, component);
-        });
-}
-
-} // namespace alia
-
-
-
-namespace alia {
-
+template<class T>
 bool
-system_needs_refresh(system const& sys)
+string_to_value(std::string const& str, T* value)
 {
-    return sys.refresh_needed;
-}
-
-void
-refresh_system(system& sys)
-{
-    sys.refresh_needed = false;
-    ++sys.refresh_counter;
-
-    int pass_count = 0;
-    while (true)
+    std::istringstream s(str);
+    T x;
+    if (!(s >> x))
+        return false;
+    s >> std::ws;
+    if (s.eof())
     {
-        refresh_event refresh;
-        detail::dispatch_event(sys, refresh);
-        if (!sys.root_component->dirty)
-            break;
-        ++pass_count;
-        assert(pass_count < 64);
-    };
+        *value = x;
+        return true;
+    }
+    return false;
 }
 
-void
-set_error_handler(system& sys, std::function<void(std::exception_ptr)> handler)
+template<class T>
+std::string
+value_to_string(T const& value)
 {
-    sys.error_handler = handler;
+    std::ostringstream s;
+    s << value;
+    return s.str();
+}
+
+template<class T>
+void
+float_from_string(T* value, std::string const& str)
+{
+    if (!string_to_value(str, value))
+        throw validation_error("This input expects a number.");
+}
+
+#define ALIA_FLOAT_CONVERSIONS(T)                                             \
+    void from_string(T* value, std::string const& str)                        \
+    {                                                                         \
+        float_from_string(value, str);                                        \
+    }                                                                         \
+    std::string to_string(T value)                                            \
+    {                                                                         \
+        return value_to_string(value);                                        \
+    }
+
+ALIA_FLOAT_CONVERSIONS(float)
+ALIA_FLOAT_CONVERSIONS(double)
+
+template<class T>
+void
+signed_integer_from_string(T* value, std::string const& str)
+{
+    long long n;
+    if (!string_to_value(str, &n))
+        throw validation_error("This input expects an integer.");
+    T x = T(n);
+    if (x != n)
+        throw validation_error("This integer is outside the supported range.");
+    *value = x;
+}
+
+template<class T>
+void
+unsigned_integer_from_string(T* value, std::string const& str)
+{
+    unsigned long long n;
+    if (!string_to_value(str, &n))
+        throw validation_error("This input expects an integer.");
+    T x = T(n);
+    if (x != n)
+        throw validation_error("This integer is outside the supported range.");
+    *value = x;
+}
+
+#define ALIA_SIGNED_INTEGER_CONVERSIONS(T)                                    \
+    void from_string(T* value, std::string const& str)                        \
+    {                                                                         \
+        signed_integer_from_string(value, str);                               \
+    }                                                                         \
+    std::string to_string(T value)                                            \
+    {                                                                         \
+        return value_to_string(value);                                        \
+    }
+
+#define ALIA_UNSIGNED_INTEGER_CONVERSIONS(T)                                  \
+    void from_string(T* value, std::string const& str)                        \
+    {                                                                         \
+        unsigned_integer_from_string(value, str);                             \
+    }                                                                         \
+    std::string to_string(T value)                                            \
+    {                                                                         \
+        return value_to_string(value);                                        \
+    }
+
+ALIA_SIGNED_INTEGER_CONVERSIONS(short int)
+ALIA_UNSIGNED_INTEGER_CONVERSIONS(unsigned short int)
+ALIA_SIGNED_INTEGER_CONVERSIONS(int)
+ALIA_UNSIGNED_INTEGER_CONVERSIONS(unsigned int)
+ALIA_SIGNED_INTEGER_CONVERSIONS(long int)
+ALIA_UNSIGNED_INTEGER_CONVERSIONS(unsigned long int)
+ALIA_SIGNED_INTEGER_CONVERSIONS(long long int)
+ALIA_UNSIGNED_INTEGER_CONVERSIONS(unsigned long long int)
+
+void
+from_string(std::string* value, std::string const& str)
+{
+    *value = str;
+}
+std::string
+to_string(std::string value)
+{
+    return value;
 }
 
 } // namespace alia
