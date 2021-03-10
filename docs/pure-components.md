@@ -36,7 +36,8 @@ If you follow those rules, you can invoke your component via
 
 <dt>invoke_pure_component(ctx, f, ...args)</dt><dd>
 
-Equivalent to calling `f(ctx, args...)` except that the call will be elided whenever possible.
+Equivalent to calling `f(ctx, args...)` except that the call will be elided
+whenever possible.
 
 `f` is only invoked when:
 
@@ -56,6 +57,10 @@ component.
 void
 player_ui(html::context ctx, duplex<std::string> name)
 {
+    // Don't do this! This is just to illustrate when this component is
+    // actually invoked.
+    ++player_ui_invocation_count;
+
     // Pure components can have internal state.
     auto score = get_state(ctx, 0);
 
@@ -65,10 +70,6 @@ player_ui(html::context ctx, duplex<std::string> name)
         p(ctx, printf(ctx, "%d points", score));
         button(ctx, "GOAL!", ++score);
     });
-
-    // Don't do this! This is just to illustrate when this component is
-    // actually invoked.
-    ++player_ui_invocation_count;
 }
 
 void
@@ -106,3 +107,8 @@ main_ui(html::context ctx)
 <div class="demo-panel">
 <div id="pure-component"></div>
 </div>
+
+Notice that the invocation count goes up by 1 whenever you change the name but
+by 2 when you click the button inside it. Changing an argument to a pure
+component only requires one invocation (to refresh). Clicking a button inside
+it requires one invocation to deliver the event and then another to refresh it.
