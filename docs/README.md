@@ -6,8 +6,9 @@ alia - A Library for Interactive Applications
 </script>
 
 alia (pronounced uh-LEE-uh) is a modern C++ library for declaratively
-developing user interfaces. It currently targets the web. In alia, the UI of
-your application is expressed as a composition of *component functions.*
+developing user interfaces. It currently targets HTML5 and client-side web
+apps. In alia, the UI of your application is expressed as a composition of
+*component functions.*
 
 alia component functions:
 
@@ -39,8 +40,9 @@ generic, and the intention is to eventually extend it to other environments.
 Live Example
 ------------
 
-Below is a simple tip calculator made using alia. You can see some other
-assorted examples [here](assorted-examples.md).
+Below is a simple tip calculator coded in alia and running live in your
+browser. You can see some other assorted examples [here](assorted-examples.md)
+and [here](https://html.alia.dev).
 
 <div class="demo-panel">
 <div id="tip-calculator-demo"></div>
@@ -51,21 +53,21 @@ void
 tip_calculator(html::context ctx)
 {
     // Get some component-local state for the bill amount.
-    auto bill = alia::get_state(ctx, empty<double>());
-    html::p(ctx, "How much is the bill?");
+    auto bill = get_state(ctx, empty<double>());
+    p(ctx, "How much is the bill?");
     // Display an input that allows the user to manipulate our bill state.
-    html::input(ctx, bill);
+    input(ctx, bill);
 
     // Get some more component-local state for the tip rate.
-    auto tip_rate = alia::get_state(ctx, empty<double>());
-    html::p(ctx, "What percentage do you want to tip?");
+    auto tip_rate = get_state(ctx, empty<double>());
+    p(ctx, "What percentage do you want to tip?");
     // Users like percentages, but we want to keep the 'tip_rate' state as a
     // rate internally, so this input presents a scaled view of it for the user.
-    html::input(ctx, scale(tip_rate, 100));
+    input(ctx, scale(tip_rate, 100));
     // Add a few buttons that set the tip rate to common values.
-    html::button(ctx, "18%", tip_rate <<= 0.18);
-    html::button(ctx, "20%", tip_rate <<= 0.20);
-    html::button(ctx, "25%", tip_rate <<= 0.25);
+    button(ctx, "18%", tip_rate <<= 0.18);
+    button(ctx, "20%", tip_rate <<= 0.20);
+    button(ctx, "25%", tip_rate <<= 0.25);
 
     // Calculate the results and display them for the user.
     // Note that these operations have dataflow semantics, and since `bill` and
@@ -73,14 +75,14 @@ tip_calculator(html::context ctx)
     // (or displayed) until the user supplies values for them.
     auto tip = bill * tip_rate;
     auto total = bill + tip;
-    html::p(ctx,
-        alia::printf(ctx,
+    p(ctx,
+        printf(ctx,
             "You should tip %.2f, for a total of %.2f.", tip, total));
 
     // Conditionally display a message suggesting cash for small amounts.
     alia_if (total < 10)
     {
-        html::p(ctx,
+        p(ctx,
             "You should consider using cash for small amounts like this.");
     }
     alia_end
@@ -107,8 +109,8 @@ object-oriented GUI libraries and drive their object hierarchies declaratively.
 The only integration that currently exists is
 [alia/HTML](html-introduction.md), which connects alia to HTML5 and allows you
 to write client-side web apps in alia. I'm currently using this for in-house
-web apps and adding additional capabilities as I need them, but it definitely
-shouldn't be considered mature.
+web apps and adding additional capabilities as I need them, so it definitely
+shouldn't be considered mature, but it's headed in that direction.
 
 alia is part of a long-term vision to enable declarative development of
 computationally intensive user interfaces in C++. If you're interested in where
@@ -116,3 +118,11 @@ it's going, check out [the roadmap](roadmap.md), and if you're interested in
 helping steer it, please don't hesitate to [get in
 touch](https://github.com/alialib/alia/discussions). I appreciate any feedback
 or interest you might have.
+
+Onward
+------
+
+[Read on](interactive-hello.md) for an introduction to some of the concepts and
+techniques used in alia to create declarative app UIs in C++. Or, if you want
+to jump right in, try out [the starter
+template](https://github.com/alialib/alia-html-starter).

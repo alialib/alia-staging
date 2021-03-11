@@ -2,7 +2,7 @@ Assorted Examples
 =================
 
 <script>
-    init_alia_demos(['tip-calculator-demo', 'for-each-map-demo', 'time-signal',
+    init_alia_demos(['for-each-map-demo', 'time-signal',
         'number-smoothing', 'color-smoothing', 'factor-tree']);
 </script>
 
@@ -11,64 +11,16 @@ Many of these come from other sections of the documentation.
 
 You may also want to check out the [alia/HTML demos](https://html.alia.dev/).
 
-Tip Calculator
---------------
-
-Here's a simple tip calculator that shows off some of the features of alia:
-[actions](actions.md), conditional widgets, and how you can use alia's data
-graph to 'magically' manifest state when and where you need it, even in the
-middle of declarative component code.
-
-```cpp
-void
-tip_calculator(html::context ctx)
-{
-    // Get some component-local state for the bill amount.
-    auto bill = alia::get_state(ctx, empty<double>());
-    html::p(ctx, "How much is the bill?");
-    // Display an input that allows the user to manipulate our bill state.
-    html::input(ctx, bill);
-
-    // Get some more component-local state for the tip rate.
-    auto tip_rate = alia::get_state(ctx, empty<double>());
-    html::p(ctx, "What percentage do you want to tip?");
-    // Users like percentages, but we want to keep the 'tip_rate' state as a
-    // rate internally, so this input presents a scaled view of it for the user.
-    html::input(ctx, scale(tip_rate, 100));
-    // Add a few buttons that set the tip rate to common values.
-    html::button(ctx, "18%", tip_rate <<= 0.18);
-    html::button(ctx, "20%", tip_rate <<= 0.20);
-    html::button(ctx, "25%", tip_rate <<= 0.25);
-
-    // Calculate the results and display them for the user.
-    // Note that these operations have dataflow semantics, and since `bill` and
-    // `tip_rate` both start out empty, nothing will actually be calculated
-    // (or displayed) until the user supplies values for them.
-    auto tip = bill * tip_rate;
-    auto total = bill + tip;
-    html::p(ctx,
-        alia::printf(ctx,
-            "You should tip %.2f, for a total of %.2f.", tip, total));
-
-    // Conditionally display a message suggesting cash for small amounts.
-    alia_if (total < 10)
-    {
-        html::p(ctx,
-            "You should consider using cash for small amounts like this.");
-    }
-    alia_end
-}
-```
-
-<div class="demo-panel">
-<div id="tip-calculator-demo"></div>
-</div>
-
 Containers
 ----------
 
 Here's an (admittedly contrived) example of working with containers in alia.
 It uses a `std::map` to map player names to their scores.
+
+Like the tip calculator on the landing page, it also shows off some of the more
+basic features of alia, like [actions](actions.md) and how you can use alia's
+data graph to 'magically' manifest state when and where you need it, even in
+the middle of declarative component code.
 
 ```cpp
 void
