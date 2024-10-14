@@ -18,7 +18,7 @@ greeting_ui(html::context ctx, duplex<std::string> name)
     html::input(ctx, name);
 
     // If we have a name, greet the user.
-    alia_if(name != "")
+    alia_if (name != "")
     {
         html::p(ctx, "Hello, " + name + "!");
     }
