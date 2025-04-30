@@ -39,7 +39,7 @@ the animation tick count:
 ```cpp
 colored_box(
     ctx,
-    interpolate(
+    lerp(
         rgb8(255, 255, 255),
         rgb8(0, 118, 255),
         (1 + std::sin(get_raw_animation_tick_count(ctx) / 600.)) / 2));
